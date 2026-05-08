@@ -1,0 +1,33 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# 构建与分发（DMG、临时映像、输出目录）
+dist/
+*.dmg
+*.sparseimage
+
+# macOS
+.DS_Store
+.AppleDouble
+.Spotlight-V100
+Thumbs.db
+
+# Chrome 扩展：签名私钥与 Chrome 打 crx 时的临时文件（勿提交 .pem）
+browser/*.pem
+browser/*.crx
+**/*.pem
+
+# 本地环境
+.env
+.env.*
+*.log
+
+# 编辑器与工具
+.idea/
+.vscode/
+*.swp
+*~

@@ -1,0 +1,23 @@
+# 默认：自动换行，仓库内以 LF 为主
+* text=auto eol=lf
+
+# 明确为文本
+*.swift text diff=swift
+*.md text diff=markdown
+*.json text
+*.html text
+*.js text
+*.sh text eol=lf
+*.plist text
+*.xml text
+*.txt text
+
+# 二进制
+*.icns binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.crx binary
+*.dmg binary
+*.zip binary
+*.pdf binary
