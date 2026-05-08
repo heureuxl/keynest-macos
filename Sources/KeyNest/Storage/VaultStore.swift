@@ -199,6 +199,14 @@ final class VaultStore: ObservableObject {
         try persistVaultV2()
     }
 
+    /// 浏览器扩展保存：当前页与用户名对应的条目已存在且密码一致时无需再次写入。
+    func shouldSkipBridgeSave(pageURL: String, username: String, password: String) -> Bool {
+        let uk = normalizedUsernameKey(username)
+        let hits = matches(forPageURL: pageURL).filter { normalizedUsernameKey($0.username) == uk }
+        guard let hit = hits.first else { return false }
+        return hit.password == password
+    }
+
     /// 按当前页与条目「网站」字段的**主机名**（域名或 IP）匹配；支持子域与根域的互相包含关系。
     func matches(forPageURL pageURL: String) -> [PasswordItem] {
         guard let pageHost = Self.normalizedSiteHostKey(pageURL) else {
@@ -338,6 +346,7 @@ final class VaultStore: ObservableObject {
     }
 
     private func persistVaultV2() throws {
+        dedupeSameHostSameUsername()
         enforceMaxAccountsPerSiteURL()
         guard let password = masterPassword,
               let dataKey = sessionDataKey,
@@ -372,6 +381,29 @@ final class VaultStore: ObservableObject {
     private func writeVaultFile(_ outer: VaultFile) throws {
         let data = try JSONEncoder().encode(outer)
         try data.write(to: vaultURL, options: .atomic)
+    }
+
+    /// 合并重复条目：同一主机键 + 同一用户名只保留**最后一次出现**（有 URL 主机时才参与；网站为空的条目互不合并）。
+    private func dedupeSameHostSameUsername() {
+        var keyToLastIndex: [String: Int] = [:]
+        for (idx, it) in items.enumerated() {
+            guard let hk = Self.normalizedSiteHostKey(it.url) else { continue }
+            let uk = normalizedUsernameKey(it.username)
+            let key = hk + "\u{1f}" + uk
+            keyToLastIndex[key] = idx
+        }
+        var removeIds = Set<UUID>()
+        for (idx, it) in items.enumerated() {
+            guard let hk = Self.normalizedSiteHostKey(it.url) else { continue }
+            let uk = normalizedUsernameKey(it.username)
+            let key = hk + "\u{1f}" + uk
+            if let keepIdx = keyToLastIndex[key], keepIdx != idx {
+                removeIds.insert(it.id)
+            }
+        }
+        if !removeIds.isEmpty {
+            items.removeAll { removeIds.contains($0.id) }
+        }
     }
 
     /// 落盘前收紧：同一主机（域名或 IP）最多 3 条不同用户名；同用户名保留最后一次出现。

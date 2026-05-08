@@ -15,8 +15,26 @@ function tpIsVisible(el) {
   return r.width > 0 && r.height > 0;
 }
 
+/** 穿透 Shadow DOM，与 credential-fill.js 一致 */
+function tpQuerySelectorAllDeep(container, selector) {
+  const out = [];
+  function walk(subroot) {
+    if (!subroot || !subroot.querySelectorAll) return;
+    try {
+      subroot.querySelectorAll(selector).forEach((el) => out.push(el));
+    } catch (_) {}
+    subroot.querySelectorAll("*").forEach((el) => {
+      if (el.shadowRoot) walk(el.shadowRoot);
+    });
+  }
+  walk(container);
+  return out;
+}
+
 function tpFindLoginPasswordInput(form) {
-  const list = Array.from(form.querySelectorAll('input[type="password"]'));
+  const list = tpQuerySelectorAllDeep(form, 'input[type="password"]').filter((el) =>
+    tpIsVisible(el)
+  );
   if (!list.length) return null;
   if (list.length === 1) return list[0];
   const cur = list.find((p) => {
@@ -26,10 +44,11 @@ function tpFindLoginPasswordInput(form) {
   return cur || list[0];
 }
 
+const TP_USER_SELECTOR =
+  'input[type="email"], input[type="text"], input[type="tel"], input[type="search"], input[type="url"], input[type="number"], input:not([type])';
+
 function tpFindUsernameInput(form, passwordEl) {
-  const candidates = Array.from(
-    form.querySelectorAll('input[type="email"], input[type="text"], input[type="tel"], input:not([type])')
-  ).filter((el) => {
+  const candidates = Array.from(tpQuerySelectorAllDeep(form, TP_USER_SELECTOR)).filter((el) => {
     const t = (el.getAttribute("type") || "text").toLowerCase();
     if (t === "hidden" || t === "password" || t === "submit" || t === "button") return false;
     if (el === passwordEl) return false;
@@ -42,8 +61,10 @@ function tpFindUsernameInput(form, passwordEl) {
     const n =
       String(el.name || "") +
       String(el.id || "") +
-      String(el.getAttribute("autocomplete") || "");
-    return /user|login|mail|account|phone|acct|id/i.test(n);
+      String(el.getAttribute("autocomplete") || "") +
+      String(el.getAttribute("aria-label") || "") +
+      String(el.placeholder || "");
+    return /user|login|mail|account|phone|acct|id|手机|账号|邮箱|用户名/i.test(n);
   });
   return byHint || candidates[0];
 }
@@ -59,18 +80,17 @@ function tpLooksLikeClassicPasswordLogin(form) {
 
 document.addEventListener(
   "submit",
-  (ev) => {
+  async (ev) => {
     const form = ev.target;
     if (!(form instanceof HTMLFormElement)) return;
     if (!tpLooksLikeClassicPasswordLogin(form)) return;
+
+    ev.preventDefault();
 
     const passwordEl = tpFindLoginPasswordInput(form);
     const usernameEl = tpFindUsernameInput(form, passwordEl);
     const password = passwordEl.value;
     const username = String(usernameEl.value || "").trim();
-
-    const ok = confirm("是否将当前账号与密码保存到本机 KeyNest？");
-    if (!ok) return;
 
     const payload = {
       title: document.title || "",
@@ -79,28 +99,79 @@ document.addEventListener(
       password,
     };
 
-    fetch(SAVE_BRIDGE, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      keepalive: true,
-    }).catch(() => {});
+    let shouldPost = false;
+    try {
+      const q = new URL(BRIDGE);
+      q.searchParams.set("url", location.href);
+      const res = await fetch(q);
+      if (res.ok) {
+        const list = await res.json();
+        const unameLower = username.toLowerCase();
+        const match = Array.isArray(list)
+          ? list.find((x) => String(x.username || "").trim().toLowerCase() === unameLower)
+          : null;
+        if (match) {
+          if (match.password === password) {
+            shouldPost = false;
+          } else {
+            shouldPost = confirm(
+              "KeyNest 已保存该账号，但密码与当前输入不一致。\n\n是否用新密码更新保管库？"
+            );
+          }
+        } else {
+          shouldPost = confirm("是否将当前账号与密码保存到本机 KeyNest？");
+        }
+      } else {
+        shouldPost = confirm(
+          "无法查询本机保管库（请先解锁 KeyNest 并开启桥接）。\n\n仍尝试保存账号密码吗？"
+        );
+      }
+    } catch (_) {
+      shouldPost = confirm("无法连接 KeyNest。\n\n仍尝试保存账号密码吗？");
+    }
+
+    if (shouldPost) {
+      fetch(SAVE_BRIDGE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+      }).catch(() => {});
+    }
+
+    const sub = ev.submitter;
+    if (sub && sub.name) {
+      let hid = form.querySelector('input[type="hidden"][data-keynest-autofill="submitter"]');
+      if (!hid) {
+        hid = document.createElement("input");
+        hid.type = "hidden";
+        hid.dataset.keynestAutofill = "submitter";
+        form.appendChild(hid);
+      }
+      hid.name = sub.name;
+      hid.value = sub.value || "";
+    }
+
+    HTMLFormElement.prototype.submit.call(form);
   },
   true
 );
 
 function hasPasswordField() {
-  return !!document.querySelector('input[type="password"]');
+  return tpQuerySelectorAllDeep(document.documentElement, 'input[type="password"]').some((el) =>
+    tpIsVisible(el)
+  );
 }
 
 function removeWidget() {
   document.getElementById(WRAP_ID)?.remove();
 }
 
-function fillInputs(cred) {
-  if (typeof globalThis.__keynestFillCredentials === "function") {
-    globalThis.__keynestFillCredentials(cred);
-  }
+async function fillInputs(cred) {
+  const fn = globalThis.__keynestFillCredentials;
+  if (typeof fn !== "function") return { ok: false, reason: "填充脚本未加载" };
+  const ret = fn(cred);
+  return ret && typeof ret.then === "function" ? await ret : { ok: true };
 }
 
 function tpPickLabel(cred) {
@@ -131,12 +202,12 @@ async function onFillClick(btn, hint, pickWrap) {
     }
     const choices = list.slice(0, 10);
     if (choices.length === 1) {
-      fillInputs(choices[0]);
-      hint.textContent = "已填入";
+      const result = await fillInputs(choices[0]);
+      hint.textContent = result.ok ? "已填入" : result.reason || "填入未生效，请手动输入";
       setTimeout(() => {
         hint.textContent = "来自本机 KeyNest";
         btn.disabled = false;
-      }, 1500);
+      }, result.ok ? 1500 : 3500);
       return;
     }
     hint.textContent = "请选择要填入的账号";
@@ -146,15 +217,15 @@ async function onFillClick(btn, hint, pickWrap) {
       sub.type = "button";
       sub.textContent = tpPickLabel(cred);
       sub.className = "pick-btn";
-      sub.addEventListener("click", () => {
-        fillInputs(cred);
+      sub.addEventListener("click", async () => {
+        const result = await fillInputs(cred);
         pickWrap.innerHTML = "";
         pickWrap.style.display = "none";
-        hint.textContent = "已填入";
+        hint.textContent = result.ok ? "已填入" : result.reason || "填入未生效";
         setTimeout(() => {
           hint.textContent = "来自本机 KeyNest";
           btn.disabled = false;
-        }, 1500);
+        }, result.ok ? 1500 : 3500);
       });
       pickWrap.appendChild(sub);
     });

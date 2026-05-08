@@ -234,6 +234,10 @@ final class LocalTCPBridge: ObservableObject {
             return
         }
         let displayTitle = title.isEmpty ? (URL(string: urlStr)?.host ?? "未命名") : title
+        if vault.shouldSkipBridgeSave(pageURL: urlStr, username: username, password: password) {
+            sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":true,"unchanged":true}"#.utf8), json: true)
+            return
+        }
         do {
             try vault.add(
                 PasswordItem(

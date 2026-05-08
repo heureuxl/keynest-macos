@@ -16,13 +16,17 @@ async function injectCred(tabId, cred) {
     target: { tabId },
     files: ["credential-fill.js"],
   });
-  await chrome.scripting.executeScript({
+  const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (c) => {
-      globalThis.__keynestFillCredentials?.(c);
+    func: async (c) => {
+      const fn = globalThis.__keynestFillCredentials;
+      if (typeof fn !== "function") return { ok: false, reason: "填充脚本未就绪" };
+      const out = fn(c);
+      return out && typeof out.then === "function" ? await out : { ok: true };
     },
     args: [cred],
   });
+  return result;
 }
 
 document.getElementById("go")?.addEventListener("click", async () => {
@@ -51,8 +55,9 @@ document.getElementById("go")?.addEventListener("click", async () => {
     }
     const choices = list.slice(0, 10);
     if (choices.length === 1) {
-      await injectCred(tab.id, choices[0]);
-      window.close();
+      const fillResult = await injectCred(tab.id, choices[0]);
+      if (fillResult?.ok) window.close();
+      else setMsg(fillResult?.reason || "填入未生效，请在本页使用右下角按钮或手动输入");
       return;
     }
     setMsg("请选择要填入的账号：");
@@ -63,8 +68,9 @@ document.getElementById("go")?.addEventListener("click", async () => {
       b.textContent = labelCred(cred);
       b.style.marginTop = "8px";
       b.addEventListener("click", async () => {
-        await injectCred(tab.id, cred);
-        window.close();
+        const fillResult = await injectCred(tab.id, cred);
+        if (fillResult?.ok) window.close();
+        else setMsg(fillResult?.reason || "填入未生效");
       });
       pick?.appendChild(b);
     });
