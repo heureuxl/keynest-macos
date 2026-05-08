@@ -236,19 +236,28 @@ struct MainVaultView: View {
     @State private var selection: UUID?
     @State private var showingAdd = false
     @State private var editingItem: PasswordItem?
+    @State private var deleteError: String?
 
     var body: some View {
         NavigationSplitView {
-            List(vault.items, id: \.id, selection: $selection) { item in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(item.title)
-                        .font(.headline)
-                    Text(MainVaultView.sidebarSubtitle(for: item))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+            List(selection: $selection) {
+                ForEach(vault.items) { item in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.title)
+                            .font(.headline)
+                        Text(MainVaultView.sidebarSubtitle(for: item))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .tag(Optional(item.id))
+                    .contextMenu {
+                        Button("删除", systemImage: "trash", role: .destructive) {
+                            deleteEntry(id: item.id)
+                        }
+                    }
                 }
-                .tag(Optional(item.id))
+                .onDelete(perform: deleteItemsAtOffsets)
             }
             .navigationTitle("密码条目")
             .toolbar {
@@ -262,11 +271,19 @@ struct MainVaultView: View {
                     }
                 }
             }
+            .alert("删除失败", isPresented: Binding(
+                get: { deleteError != nil },
+                set: { if !$0 { deleteError = nil } }
+            )) {
+                Button("好", role: .cancel) { deleteError = nil }
+            } message: {
+                Text(deleteError ?? "")
+            }
             .frame(minWidth: 240)
         } detail: {
             Group {
                 if let id = selection, let item = vault.items.first(where: { $0.id == id }) {
-                    ItemDetailView(item: item, onEdit: { editingItem = item })
+                    ItemDetailView(item: item, onEdit: { editingItem = item }, onDelete: { deleteEntry(id: item.id) })
                 } else {
                     VStack(spacing: 12) {
                         Image(systemName: "key.horizontal")
@@ -302,6 +319,25 @@ struct MainVaultView: View {
         }
     }
 
+    private func deleteEntry(id: UUID) {
+        do {
+            try vault.remove(id: id)
+            if selection == id {
+                selection = nil
+            }
+        } catch {
+            deleteError = error.localizedDescription
+        }
+    }
+
+    private func deleteItemsAtOffsets(_ offsets: IndexSet) {
+        let snapshot = vault.items
+        for index in offsets {
+            guard snapshot.indices.contains(index) else { continue }
+            deleteEntry(id: snapshot[index].id)
+        }
+    }
+
     /// 侧栏第二行：用户名与域名对齐展示。
     private static func sidebarSubtitle(for item: PasswordItem) -> String {
         let host = URL(string: item.url)?.host
@@ -320,7 +356,9 @@ struct MainVaultView: View {
 struct ItemDetailView: View {
     let item: PasswordItem
     var onEdit: () -> Void
+    var onDelete: () -> Void
     @State private var passwordRevealed = false
+    @State private var showDeleteConfirm = false
 
     var body: some View {
         Form {
@@ -373,7 +411,25 @@ struct ItemDetailView: View {
         .formStyle(.grouped)
         .navigationTitle(item.title)
         .toolbar {
-            Button("编辑", action: onEdit)
+            ToolbarItemGroup(placement: .automatic) {
+                Button("编辑", action: onEdit)
+                Button(role: .destructive) {
+                    showDeleteConfirm = true
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+                .help("删除此条目")
+            }
+        }
+        .confirmationDialog(
+            "删除「\(item.title)」？",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive, action: onDelete)
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将从本地保管库中移除该条目，且无法撤销。")
         }
         .onChange(of: item.id) { _, _ in
             passwordRevealed = false
@@ -475,7 +531,7 @@ struct ItemEditorSheet: View {
                     PasswordFieldWithReveal(placeholder: "密码", text: $password)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                TextField("网站 URL（用于自动填充匹配）", text: $url)
+                TextField("网站（域名或完整 URL；填充时按主机名匹配）", text: $url)
                 TextField("备注", text: $notes, axis: .vertical)
                     .lineLimit(3...6)
                 if let errorText {

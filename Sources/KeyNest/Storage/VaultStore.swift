@@ -124,24 +124,24 @@ final class VaultStore: ObservableObject {
         try persistVaultV2()
     }
 
-    /// 同一归一化 URL 下最多保存 3 个**不同用户名**；相同 URL + 相同用户名则覆盖（保留 id、备注）。
-    /// 网站字段为空时不受「每 URL 三条」限制。
+    /// 同一主机（域名或 IP，不含路径）下最多保存 3 个**不同用户名**；相同主机 + 相同用户名则覆盖（保留 id、备注）。
+    /// 网站字段为空时不受「每主机三条」限制。
     func add(_ item: PasswordItem) throws {
-        try addOrReplaceBySiteURL(item)
+        try addOrReplaceBySiteHost(item)
     }
 
     private func normalizedUsernameKey(_ username: String) -> String {
         username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private func addOrReplaceBySiteURL(_ item: PasswordItem) throws {
-        guard let urlKey = Self.normalizedSiteURLKey(item.url) else {
+    private func addOrReplaceBySiteHost(_ item: PasswordItem) throws {
+        guard let hostKey = Self.normalizedSiteHostKey(item.url) else {
             items.append(item)
             try persistVaultV2()
             return
         }
         let userKey = normalizedUsernameKey(item.username)
-        let group = items.enumerated().filter { Self.normalizedSiteURLKey($0.element.url) == urlKey }
+        let group = items.enumerated().filter { Self.normalizedSiteHostKey($0.element.url) == hostKey }
 
         if let hit = group.first(where: { normalizedUsernameKey($0.element.username) == userKey }) {
             var merged = hit.element
@@ -168,29 +168,24 @@ final class VaultStore: ObservableObject {
         try persistVaultV2()
     }
 
-    /// 与 `add` 使用相同归一化规则，供需要显式调用的场景使用。
-    static func normalizedSiteURLKey(_ raw: String) -> String? {
+    /// 与 `add`、扩展填充一致：仅用**主机名**（域名或 IP，小写）作为站点键，不含路径、查询、端口。
+    static func normalizedSiteHostKey(_ raw: String) -> String? {
         let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }
         var s = t
         if !s.contains("://") {
             s = "https://" + s
         }
-        guard var c = URLComponents(string: s) else {
-            return t.lowercased()
+        guard let url = URL(string: s), let host = url.host, !host.isEmpty else {
+            return nil
         }
-        c.fragment = nil
-        c.query = nil
-        c.queryItems = nil
-        guard let host = c.host, !host.isEmpty else {
-            return t.lowercased()
-        }
-        var path = c.path
-        if path.count > 1, path.hasSuffix("/") {
-            path.removeLast()
-        }
-        let scheme = (c.scheme ?? "https").lowercased()
-        return "\(scheme)://\(host.lowercased())\(path)"
+        return host.lowercased()
+    }
+
+    private static func hostsMatch(pageHost: String, credentialHost: String) -> Bool {
+        pageHost == credentialHost
+            || pageHost.hasSuffix("." + credentialHost)
+            || credentialHost.hasSuffix("." + pageHost)
     }
 
     func update(_ item: PasswordItem) throws {
@@ -204,26 +199,18 @@ final class VaultStore: ObservableObject {
         try persistVaultV2()
     }
 
-    /// 优先返回与当前页「归一化 URL」完全一致的条目（至多 3 条）；若无则回退为同主机匹配。
+    /// 按当前页与条目「网站」字段的**主机名**（域名或 IP）匹配；支持子域与根域的互相包含关系。
     func matches(forPageURL pageURL: String) -> [PasswordItem] {
-        if let pageKey = Self.normalizedSiteURLKey(pageURL) {
-            let exact = items.filter { Self.normalizedSiteURLKey($0.url) == pageKey }
-            if !exact.isEmpty {
-                return exact.sorted {
-                    $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending
-                }
-            }
-        }
-        guard let host = URL(string: pageURL)?.host?.lowercased() else {
+        guard let pageHost = Self.normalizedSiteHostKey(pageURL) else {
             return []
         }
-        let fallback = items.filter { item in
-            guard !item.url.isEmpty, let u = URL(string: item.url), let h = u.host?.lowercased() else {
+        let matched = items.filter { item in
+            guard !item.url.isEmpty, let h = Self.normalizedSiteHostKey(item.url) else {
                 return false
             }
-            return host == h || host.hasSuffix("." + h) || h.hasSuffix("." + host)
+            return Self.hostsMatch(pageHost: pageHost, credentialHost: h)
         }
-        return fallback.sorted {
+        return matched.sorted {
             $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending
         }
     }
@@ -387,13 +374,13 @@ final class VaultStore: ObservableObject {
         try data.write(to: vaultURL, options: .atomic)
     }
 
-    /// 落盘前收紧：同一归一化 URL 最多 3 条不同用户名；同用户名保留最后一次出现。
+    /// 落盘前收紧：同一主机（域名或 IP）最多 3 条不同用户名；同用户名保留最后一次出现。
     private func enforceMaxAccountsPerSiteURL() {
         let snapshot = items
         var groups: [String: [PasswordItem]] = [:]
         var keyOrder: [String] = []
         for it in snapshot {
-            guard let k = Self.normalizedSiteURLKey(it.url) else { continue }
+            guard let k = Self.normalizedSiteHostKey(it.url) else { continue }
             if groups[k] == nil { keyOrder.append(k) }
             groups[k, default: []].append(it)
         }
@@ -411,7 +398,7 @@ final class VaultStore: ObservableObject {
             }
             pick.forEach { keep.insert($0.id) }
         }
-        for it in snapshot where Self.normalizedSiteURLKey(it.url) == nil {
+        for it in snapshot where Self.normalizedSiteHostKey(it.url) == nil {
             keep.insert(it.id)
         }
         let next = snapshot.filter { keep.contains($0.id) }

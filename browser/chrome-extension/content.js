@@ -125,7 +125,7 @@ async function onFillClick(btn, hint, pickWrap) {
     }
     const list = await res.json();
     if (!Array.isArray(list) || list.length === 0) {
-      hint.textContent = "无匹配：请在桌面端为该网站填写「网站 URL」";
+      hint.textContent = "无匹配：请在桌面端填写该站的域名或网址（按主机名匹配）";
       btn.disabled = false;
       return;
     }

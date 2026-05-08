@@ -46,7 +46,7 @@ document.getElementById("go")?.addEventListener("click", async () => {
     }
     const list = await res.json();
     if (!Array.isArray(list) || list.length === 0) {
-      setMsg("无匹配条目：请在桌面端为当前网站保存 URL。");
+      setMsg("无匹配条目：请在桌面端填写该站的域名或网址（按主机名匹配）。");
       return;
     }
     const choices = list.slice(0, 10);
