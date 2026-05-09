@@ -171,6 +171,9 @@ final class VaultStore: ObservableObject {
             merged.password = item.password
             merged.url = item.url
             merged.notes = item.notes
+            if !item.customFields.isEmpty {
+                merged.customFields = item.customFields
+            }
             items[hit.offset] = merged
             let dupIds = group.filter { $0.offset != hit.offset && normalizedUsernameKey($0.element.username) == userKey }.map(\.element.id)
             items.removeAll { dupIds.contains($0.id) }
@@ -219,6 +222,21 @@ final class VaultStore: ObservableObject {
     func remove(id: UUID) throws {
         items.removeAll { $0.id == id }
         try persistVaultV2()
+    }
+
+    func toggleFavorite(id: UUID) throws {
+        guard let i = items.firstIndex(where: { $0.id == id }) else { return }
+        items[i].isFavorite.toggle()
+        try persistVaultV2()
+    }
+
+    /// 同一主机 + 同一用户名仅保留一条（保留最后一次）。返回合并删除的条数。
+    func mergeDuplicateHostUsernames() throws -> Int {
+        let before = items.count
+        dedupeSameHostSameUsername()
+        guard items.count != before else { return 0 }
+        try persistVaultV2()
+        return before - items.count
     }
 
     /// 浏览器扩展保存：当前页与用户名对应的条目已存在且密码一致时无需再次写入。

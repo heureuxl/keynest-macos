@@ -5,6 +5,7 @@ import SwiftUI
 struct KeyNestApp: App {
     @StateObject private var vault = VaultStore()
     @StateObject private var bridge = LocalTCPBridge()
+    @StateObject private var entryUsage = EntryUsageStore()
     @AppStorage("bridgeEnabled") private var bridgeEnabled = true
 
     var body: some Scene {
@@ -12,6 +13,7 @@ struct KeyNestApp: App {
             ContentView()
                 .environmentObject(vault)
                 .environmentObject(bridge)
+                .environmentObject(entryUsage)
                 .onAppear {
                     bridge.attach(vault: vault)
                     syncBridge()
@@ -29,6 +31,7 @@ struct KeyNestApp: App {
             KeyNestMenuBarExtraContent()
                 .environmentObject(vault)
                 .environmentObject(bridge)
+                .environmentObject(entryUsage)
         }
         .menuBarExtraStyle(.menu)
     }

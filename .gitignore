@@ -21,6 +21,9 @@ browser/*.pem
 browser/*.crx
 **/*.pem
 
+# Safari Web Extension：xcrun safari-web-extension-converter 生成的 Xcode 工程
+browser/safari-extension-build/
+
 # 本地环境
 .env
 .env.*

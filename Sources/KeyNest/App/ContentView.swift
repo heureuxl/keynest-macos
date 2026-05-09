@@ -62,7 +62,7 @@ struct ContentView: View {
 }
 
 /// 首次创建 / 从旧版升级 / 手动更换恢复密钥后展示。
-private struct RecoveryKeySetupSheet: View {
+struct RecoveryKeySetupSheet: View {
     let recoveryKey: String
     var headline: String = "请保存恢复密钥"
     var detail: String =
@@ -233,187 +233,10 @@ private struct RecoveryUnlockSheet: View {
     }
 }
 
-struct MainVaultView: View {
-    @EnvironmentObject private var vault: VaultStore
-    @AppStorage("bridgeEnabled") private var bridgeEnabled = true
-    @State private var selection: UUID?
-    @State private var showingAdd = false
-    @State private var editingItem: PasswordItem?
-    @State private var deleteError: String?
-    @State private var confirmRotateRecovery = false
-    @State private var rotatedRecoveryKeyToShow: String?
-    @State private var rotateRecoveryError: String?
-
-    var body: some View {
-        NavigationSplitView {
-            List(selection: $selection) {
-                ForEach(vault.items) { item in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.title)
-                            .font(.headline)
-                        Text(MainVaultView.sidebarSubtitle(for: item))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .tag(Optional(item.id))
-                    .contextMenu {
-                        Button("删除", systemImage: "trash", role: .destructive) {
-                            deleteEntry(id: item.id)
-                        }
-                    }
-                }
-                .onDelete(perform: deleteItemsAtOffsets)
-            }
-            .navigationTitle("密码条目")
-            .toolbar {
-                ToolbarItemGroup {
-                    Button {
-                        showingAdd = true
-                    } label: {
-                        Label("添加", systemImage: "plus")
-                    }
-                    .labelStyle(.titleAndIcon)
-                    .help("添加条目")
-
-                    Button {
-                        confirmRotateRecovery = true
-                    } label: {
-                        Label("更换恢复密钥", systemImage: "key.rotate.fill")
-                    }
-                    .labelStyle(.titleAndIcon)
-                    .help("生成新恢复密钥短语，旧短语立即作废")
-
-                    Button {
-                        vault.lock()
-                        selection = nil
-                    } label: {
-                        Label("锁定", systemImage: "lock.fill")
-                    }
-                    .labelStyle(.titleAndIcon)
-                    .help("锁定保管库")
-                }
-            }
-            .confirmationDialog(
-                "更换恢复密钥",
-                isPresented: $confirmRotateRecovery,
-                titleVisibility: .visible
-            ) {
-                Button("确定更换", role: .destructive) {
-                    rotateRecoveryError = nil
-                    do {
-                        let phrase = try vault.rotateRecoveryKey()
-                        rotatedRecoveryKeyToShow = phrase
-                    } catch {
-                        rotateRecoveryError = error.localizedDescription
-                    }
-                }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("更换成功后，旧恢复密钥将立即失效，无法再用于找回主密码。请务必保存即将展示的新密钥。")
-            }
-            .alert("删除失败", isPresented: Binding(
-                get: { deleteError != nil },
-                set: { if !$0 { deleteError = nil } }
-            )) {
-                Button("好", role: .cancel) { deleteError = nil }
-            } message: {
-                Text(deleteError ?? "")
-            }
-            .alert("更换恢复密钥失败", isPresented: Binding(
-                get: { rotateRecoveryError != nil },
-                set: { if !$0 { rotateRecoveryError = nil } }
-            )) {
-                Button("好", role: .cancel) { rotateRecoveryError = nil }
-            } message: {
-                Text(rotateRecoveryError ?? "")
-            }
-            .frame(minWidth: 240)
-        } detail: {
-            Group {
-                if let id = selection, let item = vault.items.first(where: { $0.id == id }) {
-                    ItemDetailView(item: item, onEdit: { editingItem = item }, onDelete: { deleteEntry(id: item.id) })
-                } else {
-                    VStack(spacing: 12) {
-                        Image(systemName: "key.horizontal")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                        Text("选择一条记录")
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .sheet(isPresented: Binding(
-            get: { rotatedRecoveryKeyToShow != nil },
-            set: { if !$0 { rotatedRecoveryKeyToShow = nil } }
-        )) {
-            RecoveryKeySetupSheet(
-                recoveryKey: rotatedRecoveryKeyToShow ?? "",
-                headline: "请保存新的恢复密钥",
-                detail: "旧的恢复密钥已失效，找回主密码仅能使用下列新密钥。请立即复制并妥善保管。",
-                onConfirm: { rotatedRecoveryKeyToShow = nil }
-            )
-        }
-        .sheet(isPresented: $showingAdd) {
-            ItemEditorSheet(mode: .add)
-        }
-        .sheet(item: $editingItem) { item in
-            ItemEditorSheet(mode: .edit(item))
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Toggle("允许浏览器扩展连接本机端口 17373", isOn: $bridgeEnabled)
-                    .toggleStyle(.switch)
-                    .font(.caption)
-                Spacer()
-                Text("仅在解锁时监听；凭据不离开本机。")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .background(.bar)
-        }
-    }
-
-    private func deleteEntry(id: UUID) {
-        do {
-            try vault.remove(id: id)
-            if selection == id {
-                selection = nil
-            }
-        } catch {
-            deleteError = error.localizedDescription
-        }
-    }
-
-    private func deleteItemsAtOffsets(_ offsets: IndexSet) {
-        let snapshot = vault.items
-        for index in offsets {
-            guard snapshot.indices.contains(index) else { continue }
-            deleteEntry(id: snapshot[index].id)
-        }
-    }
-
-    /// 侧栏第二行：用户名与域名对齐展示。
-    private static func sidebarSubtitle(for item: PasswordItem) -> String {
-        let host = URL(string: item.url)?.host
-        if !item.username.isEmpty {
-            if let host, !host.isEmpty {
-                return "\(item.username) · \(host)"
-            }
-            return item.username
-        }
-        if let host, !host.isEmpty { return host }
-        let u = item.url.trimmingCharacters(in: .whitespacesAndNewlines)
-        return u.isEmpty ? " " : u
-    }
-}
-
 struct ItemDetailView: View {
+    @EnvironmentObject private var vault: VaultStore
+    @EnvironmentObject private var usage: EntryUsageStore
+
     let item: PasswordItem
     var onEdit: () -> Void
     var onDelete: () -> Void
@@ -424,20 +247,23 @@ struct ItemDetailView: View {
         Form {
             Section("条目") {
                 LabeledContent("标题") {
-                    Text(item.title)
+                    Text(item.title.isEmpty ? "未命名" : item.title)
                         .font(.body.weight(.medium))
                 }
                 LabeledContent("网站") {
                     Group {
                         if item.url.isEmpty {
-                            Text("—").foregroundStyle(.secondary)
+                            Text("—")
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
                         } else {
                             Text(item.url)
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
                                 .lineLimit(3)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .multilineTextAlignment(.trailing)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
                         }
                     }
                 }
@@ -460,6 +286,30 @@ struct ItemDetailView: View {
                     .foregroundStyle(.tertiary)
             }
 
+            if !item.customFields.isEmpty {
+                Section("自定义字段") {
+                    ForEach(item.customFields) { field in
+                        LabeledContent(field.label.isEmpty ? "（未命名）" : field.label) {
+                            HStack {
+                                Text(field.value.isEmpty ? "—" : field.value)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                                if !field.value.isEmpty {
+                                    Button {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(field.value, forType: .string)
+                                    } label: {
+                                        Image(systemName: "doc.on.doc")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("复制")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if !item.notes.isEmpty {
                 Section("备注") {
                     Text(item.notes)
@@ -467,11 +317,27 @@ struct ItemDetailView: View {
                         .textSelection(.enabled)
                 }
             }
+
+            if PasswordStrength.isWeak(item.password) {
+                Section {
+                    Text("根据本地规则，当前密码偏短或字符类型较少，建议在网站修改后在此更新。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("弱密码提示")
+                }
+            }
         }
         .formStyle(.grouped)
-        .navigationTitle(item.title)
+        .navigationTitle(item.title.isEmpty ? "未命名" : item.title)
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
+                Button {
+                    try? vault.toggleFavorite(id: item.id)
+                } label: {
+                    Label(item.isFavorite ? "取消收藏" : "收藏", systemImage: item.isFavorite ? "star.fill" : "star")
+                }
+                .help(item.isFavorite ? "取消收藏" : "加入收藏")
                 Button("编辑", action: onEdit)
                 Button(role: .destructive) {
                     showDeleteConfirm = true
@@ -491,8 +357,12 @@ struct ItemDetailView: View {
         } message: {
             Text("将从本地保管库中移除该条目，且无法撤销。")
         }
+        .onAppear {
+            usage.recordAccess(id: item.id)
+        }
         .onChange(of: item.id) { _, _ in
             passwordRevealed = false
+            usage.recordAccess(id: item.id)
         }
     }
 
@@ -530,6 +400,7 @@ struct ItemDetailView: View {
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(item.password, forType: .string)
+                        usage.recordAccess(id: item.id)
                     } label: {
                         Image(systemName: "doc.on.doc")
                             .font(.body)
@@ -580,26 +451,74 @@ struct ItemEditorSheet: View {
     @State private var password: String = ""
     @State private var url: String = ""
     @State private var notes: String = ""
+    @State private var customFields: [CustomField] = []
+    @State private var isFavorite: Bool = false
     @State private var errorText: String?
 
     var body: some View {
         NavigationStack {
             Form {
-                TextField("标题", text: $title)
-                TextField("用户名", text: $username)
-                LabeledContent("密码") {
-                    PasswordFieldWithReveal(placeholder: "密码", text: $password)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                Section {
+                    Toggle("收藏（侧栏优先展示）", isOn: $isFavorite)
                 }
-                TextField("网站（域名或完整 URL；填充时按主机名匹配）", text: $url)
-                TextField("备注", text: $notes, axis: .vertical)
-                    .lineLimit(3...6)
+                Section("账号") {
+                    TextField("标题", text: $title)
+                    TextField("用户名", text: $username)
+                    LabeledContent("密码") {
+                        PasswordFieldWithReveal(placeholder: "密码", text: $password)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    TextField("网站（域名或完整 URL；填充时按主机名匹配）", text: $url)
+                        .multilineTextAlignment(.trailing)
+                }
+                Section {
+                    ForEach($customFields) { $field in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            TextField("字段名", text: $field.label)
+                                .frame(minWidth: 88)
+                            TextField("内容", text: $field.value)
+                            Button(role: .destructive) {
+                                removeField(id: field.id)
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                            }
+                            .buttonStyle(.plain)
+                            .help("删除此行")
+                        }
+                    }
+                    Button {
+                        customFields.append(CustomField(label: "", value: ""))
+                    } label: {
+                        Label("添加字段", systemImage: "plus.circle")
+                    }
+                } header: {
+                    Text("自定义字段")
+                } footer: {
+                    Text("适用于银行卡附加信息、API Key、密保问答等；浏览器扩展填充仍使用上方的用户名与密码。")
+                        .font(.caption)
+                }
+
+                Section {
+                    Menu("插入字段模板") {
+                        Button("银行卡（卡号 / 有效期 / CVV / 持卡人）") { applyBankCardTemplate() }
+                        Button("API 密钥（Client ID / Secret / Endpoint）") { applyApiTemplate() }
+                        Button("密保问题（三组问答）") { applySecurityQATemplate() }
+                    }
+                }
+
+                Section("备注") {
+                    TextField("备注", text: $notes, axis: .vertical)
+                        .lineLimit(3...8)
+                }
+
                 if let errorText {
-                    Text(errorText).foregroundStyle(.red)
+                    Section {
+                        Text(errorText).foregroundStyle(.red)
+                    }
                 }
             }
             .formStyle(.grouped)
-            .frame(minWidth: 420, minHeight: 360)
+            .frame(minWidth: 460, minHeight: 420)
             .navigationTitle(navTitle)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -630,15 +549,73 @@ struct ItemEditorSheet: View {
             password = item.password
             url = item.url
             notes = item.notes
+            customFields = item.customFields
+            isFavorite = item.isFavorite
         }
+    }
+
+    private func removeField(id: UUID) {
+        customFields.removeAll { $0.id == id }
+    }
+
+    private func appendFieldsIfAbsent(_ pairs: [(String, String)]) {
+        for (label, value) in pairs {
+            let exists = customFields.contains {
+                $0.label.trimmingCharacters(in: .whitespacesAndNewlines) == label
+            }
+            if !exists {
+                customFields.append(CustomField(label: label, value: value))
+            }
+        }
+    }
+
+    private func applyBankCardTemplate() {
+        appendFieldsIfAbsent([
+            ("卡号", ""),
+            ("有效期", ""),
+            ("CVV", ""),
+            ("持卡人", ""),
+        ])
+    }
+
+    private func applyApiTemplate() {
+        appendFieldsIfAbsent([
+            ("Client ID", ""),
+            ("Secret", ""),
+            ("Endpoint", ""),
+        ])
+    }
+
+    private func applySecurityQATemplate() {
+        appendFieldsIfAbsent([
+            ("问题 1", ""),
+            ("答案 1", ""),
+            ("问题 2", ""),
+            ("答案 2", ""),
+            ("问题 3", ""),
+            ("答案 3", ""),
+        ])
     }
 
     private func save() {
         errorText = nil
+        let trimmedFields = customFields.map {
+            CustomField(id: $0.id, label: $0.label.trimmingCharacters(in: .whitespacesAndNewlines), value: $0.value)
+        }.filter { !$0.label.isEmpty || !$0.value.isEmpty }
         do {
             switch mode {
             case .add:
-                try vault.add(PasswordItem(title: title, username: username, password: password, url: url, notes: notes))
+                try vault.add(
+                    PasswordItem(
+                        title: title,
+                        username: username,
+                        password: password,
+                        url: url,
+                        notes: notes,
+                        customFields: trimmedFields,
+                        isFavorite: isFavorite
+                    )
+                )
             case .edit(let original):
                 try vault.update(
                     PasswordItem(
@@ -647,7 +624,9 @@ struct ItemEditorSheet: View {
                         username: username,
                         password: password,
                         url: url,
-                        notes: notes
+                        notes: notes,
+                        customFields: trimmedFields,
+                        isFavorite: isFavorite
                     )
                 )
             }

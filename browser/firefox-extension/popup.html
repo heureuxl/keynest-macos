@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: system-ui; width: 300px; padding: 12px; margin: 0; }
+    button { width: 100%; padding: 10px; cursor: pointer; }
+    #pick button { font-size: 12px; text-align: left; }
+    p { font-size: 12px; color: #666; }
+    .err { color: #b00; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <p>从本机 KeyNest 拉取与当前页匹配的凭据；若同一网站保存了多个账号，将列出供你选择（每页最多 3 个）。</p>
+  <p><strong>提示：</strong>在普通网页登录页（含密码框）右下角会出现「KeyNest 填入」按钮，无需每次点工具栏图标。</p>
+  <button id="go" type="button">填入此标签页</button>
+  <div id="pick"></div>
+  <p id="msg" class="err"></p>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

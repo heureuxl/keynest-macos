@@ -155,6 +155,6 @@ APPLESCRIPT
 fi
 
 if [[ "${BUILD_CHROME_EXT:-}" == "1" ]]; then
-  echo "==> Chrome 扩展（.crx / .zip）"
+  echo "==> 浏览器扩展（Chrome / Edge / Firefox：.zip；Chrome 另 .crx）"
   bash "$ROOT/scripts/build-chrome-extension.sh"
 fi
