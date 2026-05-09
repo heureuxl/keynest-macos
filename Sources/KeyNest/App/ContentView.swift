@@ -268,16 +268,30 @@ struct MainVaultView: View {
             .navigationTitle("密码条目")
             .toolbar {
                 ToolbarItemGroup {
-                    Button("添加", systemImage: "plus") {
+                    Button {
                         showingAdd = true
+                    } label: {
+                        Label("添加", systemImage: "plus")
                     }
-                    Button("更换恢复密钥", systemImage: "key.rotate.fill") {
+                    .labelStyle(.titleAndIcon)
+                    .help("添加条目")
+
+                    Button {
                         confirmRotateRecovery = true
+                    } label: {
+                        Label("更换恢复密钥", systemImage: "key.rotate.fill")
                     }
-                    Button("锁定", systemImage: "lock.fill") {
+                    .labelStyle(.titleAndIcon)
+                    .help("生成新恢复密钥短语，旧短语立即作废")
+
+                    Button {
                         vault.lock()
                         selection = nil
+                    } label: {
+                        Label("锁定", systemImage: "lock.fill")
                     }
+                    .labelStyle(.titleAndIcon)
+                    .help("锁定保管库")
                 }
             }
             .confirmationDialog(
