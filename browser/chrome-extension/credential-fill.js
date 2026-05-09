@@ -296,5 +296,33 @@
     };
   }
 
+  /**
+   * 供 content 脚本在登录「按钮点击」等非经典 submit 场景读取当前输入框（含 Shadow DOM）。
+   * @returns {{ username: string, password: string } | null}
+   */
+  function collectLoginSnapshot() {
+    const passEl = pickBestPasswordInput();
+    if (!passEl || !String(passEl.value || "").trim()) return null;
+    const userEl = findUsernameForPassword(passEl);
+    let username = userEl ? String(userEl.value || "").trim() : "";
+    if (!username) {
+      const passwords = findAllPasswordInputs();
+      const scope =
+        passwords.length > 1
+          ? document.documentElement
+          : passEl.closest("main") || passEl.closest('[role="main"]') || document.body || document.documentElement;
+      const telCandidates = querySelectorAllDeep(scope, 'input[type="tel"]').filter(
+        (el) => el instanceof HTMLInputElement && isVisible(el) && el !== passEl
+      );
+      const tel = telCandidates.find((el) => String(el.value || "").trim());
+      if (tel) username = String(tel.value || "").trim();
+    }
+    return {
+      username,
+      password: String(passEl.value || ""),
+    };
+  }
+
   globalThis.__keynestFillCredentials = fillCredentials;
+  globalThis.__keynestCollectLoginSnapshot = collectLoginSnapshot;
 })();

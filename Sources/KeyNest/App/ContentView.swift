@@ -61,16 +61,19 @@ struct ContentView: View {
     }
 }
 
-/// 首次创建或从旧版升级后，仅此一次展示恢复密钥。
+/// 首次创建 / 从旧版升级 / 手动更换恢复密钥后展示。
 private struct RecoveryKeySetupSheet: View {
     let recoveryKey: String
+    var headline: String = "请保存恢复密钥"
+    var detail: String =
+        "若忘记主密码，仅凭本地保管库文件无法找回数据。请立即复制下列密钥并保存在安全处（密码管理器打印稿等）。关闭后将不再完整显示。"
     var onConfirm: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("请保存恢复密钥")
+            Text(headline)
                 .font(.title2.bold())
-            Text("若忘记主密码，仅凭本地保管库文件无法找回数据。请立即复制下列密钥并保存在安全处（密码管理器打印稿等）。关闭后将不再完整显示。")
+            Text(detail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -237,6 +240,9 @@ struct MainVaultView: View {
     @State private var showingAdd = false
     @State private var editingItem: PasswordItem?
     @State private var deleteError: String?
+    @State private var confirmRotateRecovery = false
+    @State private var rotatedRecoveryKeyToShow: String?
+    @State private var rotateRecoveryError: String?
 
     var body: some View {
         NavigationSplitView {
@@ -265,11 +271,32 @@ struct MainVaultView: View {
                     Button("添加", systemImage: "plus") {
                         showingAdd = true
                     }
+                    Button("更换恢复密钥", systemImage: "key.rotate.fill") {
+                        confirmRotateRecovery = true
+                    }
                     Button("锁定", systemImage: "lock.fill") {
                         vault.lock()
                         selection = nil
                     }
                 }
+            }
+            .confirmationDialog(
+                "更换恢复密钥",
+                isPresented: $confirmRotateRecovery,
+                titleVisibility: .visible
+            ) {
+                Button("确定更换", role: .destructive) {
+                    rotateRecoveryError = nil
+                    do {
+                        let phrase = try vault.rotateRecoveryKey()
+                        rotatedRecoveryKeyToShow = phrase
+                    } catch {
+                        rotateRecoveryError = error.localizedDescription
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("更换成功后，旧恢复密钥将立即失效，无法再用于找回主密码。请务必保存即将展示的新密钥。")
             }
             .alert("删除失败", isPresented: Binding(
                 get: { deleteError != nil },
@@ -278,6 +305,14 @@ struct MainVaultView: View {
                 Button("好", role: .cancel) { deleteError = nil }
             } message: {
                 Text(deleteError ?? "")
+            }
+            .alert("更换恢复密钥失败", isPresented: Binding(
+                get: { rotateRecoveryError != nil },
+                set: { if !$0 { rotateRecoveryError = nil } }
+            )) {
+                Button("好", role: .cancel) { rotateRecoveryError = nil }
+            } message: {
+                Text(rotateRecoveryError ?? "")
             }
             .frame(minWidth: 240)
         } detail: {
@@ -296,6 +331,17 @@ struct MainVaultView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .sheet(isPresented: Binding(
+            get: { rotatedRecoveryKeyToShow != nil },
+            set: { if !$0 { rotatedRecoveryKeyToShow = nil } }
+        )) {
+            RecoveryKeySetupSheet(
+                recoveryKey: rotatedRecoveryKeyToShow ?? "",
+                headline: "请保存新的恢复密钥",
+                detail: "旧的恢复密钥已失效，找回主密码仅能使用下列新密钥。请立即复制并妥善保管。",
+                onConfirm: { rotatedRecoveryKeyToShow = nil }
+            )
         }
         .sheet(isPresented: $showingAdd) {
             ItemEditorSheet(mode: .add)

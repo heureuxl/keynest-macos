@@ -1,11 +1,217 @@
 /**
  * 在登录页注入可见入口：检测到密码框后在右下角显示「KeyNest 填入」。
- * 传统表单提交（含密码框 + 账号框）时可选保存到本机；不拦截登录流程。
+ * 经典表单 submit、以及常见「登录」按钮点击（SPA / fetch 登录）后尝试保存；不拦截登录流程。
  * 需扩展具备 host_permissions: http://127.0.0.1:17373/*
  */
 const BRIDGE = "http://127.0.0.1:17373/api/credentials";
 const SAVE_BRIDGE = "http://127.0.0.1:17373/api/save";
 const WRAP_ID = "__keynest_fill_wrap__";
+const HINT_ID = "__keynest_hint__";
+
+/** @param {{ title?: string, url: string, username: string, password: string }} payload */
+async function runSaveOffer(payload) {
+  const password = String(payload.password || "").trim();
+  if (!password) return;
+
+  const now = Date.now();
+  if (now - (globalThis.__knLastSaveOfferAt || 0) < 900) return;
+  globalThis.__knLastSaveOfferAt = now;
+
+  const uname = String(payload.username || "").trim();
+  const dedupe =
+    "kn_sv_" +
+    location.hostname +
+    "_" +
+    (() => {
+      try {
+        return btoa(unescape(encodeURIComponent(uname + "\n" + password))).slice(0, 48);
+      } catch (_) {
+        return String(uname.length) + "_" + String(password.length);
+      }
+    })();
+  try {
+    const prev = sessionStorage.getItem(dedupe);
+    if (prev && now - Number(prev) < 120000) return;
+  } catch (_) {}
+
+  let shouldPost = false;
+  try {
+    const q = new URL(BRIDGE);
+    q.searchParams.set("url", location.href);
+    const res = await fetch(q);
+    if (res.ok) {
+      const list = await res.json();
+      const unameLower = uname.toLowerCase();
+      const match = Array.isArray(list)
+        ? list.find((x) => String(x.username || "").trim().toLowerCase() === unameLower)
+        : null;
+      if (match) {
+        if (match.password === password) {
+          shouldPost = false;
+        } else {
+          shouldPost = confirm(
+            "KeyNest 已保存该账号，但密码与当前输入不一致。\n\n是否用新密码更新保管库？"
+          );
+        }
+      } else {
+        const msg = uname
+          ? "是否将当前账号与密码保存到本机 KeyNest？"
+          : "未检测到用户名（部分网站用手机号字段）。是否仍将密码保存到本机 KeyNest？可在桌面端再补充用户名。";
+        shouldPost = confirm(msg);
+      }
+    } else {
+      shouldPost = confirm(
+        "无法查询本机保管库（请先解锁 KeyNest 并开启桥接）。\n\n仍尝试保存账号密码吗？"
+      );
+    }
+  } catch (_) {
+    shouldPost = confirm("无法连接 KeyNest。\n\n仍尝试保存账号密码吗？");
+  }
+
+  if (shouldPost) {
+    try {
+      sessionStorage.setItem(dedupe, String(now));
+    } catch (_) {}
+    fetch(SAVE_BRIDGE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: payload.title || document.title || "",
+        url: payload.url || location.href,
+        username: uname,
+        password,
+      }),
+      keepalive: true,
+    }).catch(() => {});
+  }
+}
+
+/** 页面内简短提示（不阻塞操作） */
+function showKeynestHint(text) {
+  document.getElementById(HINT_ID)?.remove();
+  if (!text || !document.body) return;
+  const wrap = document.createElement("div");
+  wrap.id = HINT_ID;
+  wrap.setAttribute("data-keynest", "1");
+  const sh = wrap.attachShadow({ mode: "open" });
+  const s = document.createElement("style");
+  s.textContent = `
+    .bar {
+      position: fixed;
+      left: 50%;
+      bottom: 88px;
+      transform: translateX(-50%);
+      z-index: 2147483646;
+      max-width: min(420px, calc(100vw - 32px));
+      padding: 12px 16px;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.92);
+      color: #f1f5f9;
+      font: 13px/1.45 system-ui, -apple-system, sans-serif;
+      box-shadow: 0 8px 24px rgba(0,0,0,.35);
+      border: 1px solid rgba(255,255,255,.12);
+    }
+  `;
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  bar.textContent = text;
+  sh.appendChild(s);
+  sh.appendChild(bar);
+  document.body.appendChild(wrap);
+  setTimeout(() => wrap.remove(), 8000);
+}
+
+function isOurUiElement(el) {
+  if (!(el instanceof Element)) return false;
+  return Boolean(el.closest?.("[data-keynest]") || el.id === WRAP_ID || el.id === HINT_ID);
+}
+
+function looksLikeLoginButton(el) {
+  if (!(el instanceof Element)) return false;
+  if (isOurUiElement(el)) return false;
+  let node = el;
+  for (let i = 0; i < 8 && node; i++) {
+    const tag = (node.tagName || "").toLowerCase();
+    const role = (node.getAttribute?.("role") || "").toLowerCase();
+    const text =
+      (node.textContent || "") +
+      " " +
+      (node.getAttribute?.("aria-label") || "") +
+      " " +
+      (node.getAttribute?.("value") || "") +
+      " " +
+      (node.className || "") +
+      " " +
+      (node.id || "");
+    if (/register|sign\s*up|forgot|reset\s+password|找回密码|免费注册/i.test(text)) return false;
+
+    const isSubmitInput = tag === "input" && /^(submit|button)$/i.test(node.getAttribute("type") || "");
+    const isTextButton =
+      tag === "button" || role === "button" || isSubmitInput || tag === "a";
+    if (!isTextButton) {
+      node = node.parentElement;
+      continue;
+    }
+
+    if (
+      /sign\s*in|log\s*in|logon|login|submit|continu|next|verify|unlock|authorize|登\s*录|登陆|登录|进入|确认|提交|下一步|验证|开始|登\s*入/i.test(
+        text
+      )
+    )
+      return true;
+    if (isSubmitInput) return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
+function scheduleSnapshotSave() {
+  clearTimeout(globalThis.__keynestSaveDebounce);
+  globalThis.__keynestSaveDebounce = setTimeout(() => {
+    const snapFn = globalThis.__keynestCollectLoginSnapshot;
+    if (typeof snapFn !== "function") return;
+    const snap = snapFn();
+    if (!snap || !String(snap.password || "").trim()) return;
+    if (!String(snap.username || "").trim()) {
+      showKeynestHint(
+        "KeyNest：未检测到账号输入框内容。若网站用手机号登录，请先填写手机号再点登录；也可之后在桌面端补充用户名。"
+      );
+    }
+    runSaveOffer({
+      title: document.title || "",
+      url: location.href,
+      username: snap.username || "",
+      password: snap.password,
+    });
+  }, 480);
+}
+
+document.addEventListener(
+  "click",
+  (ev) => {
+    const t = ev.target;
+    if (!(t instanceof Element)) return;
+    if (isOurUiElement(t)) return;
+    if (!looksLikeLoginButton(t)) return;
+    scheduleSnapshotSave();
+  },
+  true
+);
+
+document.addEventListener(
+  "keydown",
+  (ev) => {
+    if (ev.key !== "Enter" || ev.isComposing || ev.defaultPrevented) return;
+    const t = ev.target;
+    if (!(t instanceof HTMLElement)) return;
+    if (t.isContentEditable) return;
+    if (t instanceof HTMLTextAreaElement) return;
+    if (t instanceof HTMLInputElement && t.type === "password") {
+      scheduleSnapshotSave();
+    }
+  },
+  true
+);
 
 function tpIsVisible(el) {
   if (!el || !(el instanceof HTMLElement)) return false;
@@ -99,45 +305,7 @@ document.addEventListener(
       password,
     };
 
-    let shouldPost = false;
-    try {
-      const q = new URL(BRIDGE);
-      q.searchParams.set("url", location.href);
-      const res = await fetch(q);
-      if (res.ok) {
-        const list = await res.json();
-        const unameLower = username.toLowerCase();
-        const match = Array.isArray(list)
-          ? list.find((x) => String(x.username || "").trim().toLowerCase() === unameLower)
-          : null;
-        if (match) {
-          if (match.password === password) {
-            shouldPost = false;
-          } else {
-            shouldPost = confirm(
-              "KeyNest 已保存该账号，但密码与当前输入不一致。\n\n是否用新密码更新保管库？"
-            );
-          }
-        } else {
-          shouldPost = confirm("是否将当前账号与密码保存到本机 KeyNest？");
-        }
-      } else {
-        shouldPost = confirm(
-          "无法查询本机保管库（请先解锁 KeyNest 并开启桥接）。\n\n仍尝试保存账号密码吗？"
-        );
-      }
-    } catch (_) {
-      shouldPost = confirm("无法连接 KeyNest。\n\n仍尝试保存账号密码吗？");
-    }
-
-    if (shouldPost) {
-      fetch(SAVE_BRIDGE, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        keepalive: true,
-      }).catch(() => {});
-    }
+    await runSaveOffer(payload);
 
     const sub = ev.submitter;
     if (sub && sub.name) {

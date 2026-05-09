@@ -124,6 +124,27 @@ final class VaultStore: ObservableObject {
         try persistVaultV2()
     }
 
+    /// 在已解锁状态下生成新的恢复密钥短语；旧短语立即失效（与 Windows 版行为一致）。
+    func rotateRecoveryKey() throws -> String {
+        guard masterPassword != nil,
+              let dataKey = sessionDataKey,
+              vaultSaltMaster != nil,
+              vaultSaltRecovery != nil,
+              vaultWrappedRecovery != nil
+        else {
+            throw VaultStoreError.notUnlocked
+        }
+        let recoveryPhrase = VaultCrypto.generateRecoveryKeyPhrase()
+        let saltR = VaultCrypto.randomSalt()
+        let kr = try VaultCrypto.deriveKey(password: recoveryPhrase, salt: saltR)
+        let dkBytes = VaultCrypto.symmetricKeyBytes(dataKey)
+        let wR = try VaultCrypto.encrypt(plaintext: dkBytes, key: kr)
+        vaultSaltRecovery = saltR
+        vaultWrappedRecovery = wR
+        try persistVaultV2()
+        return recoveryPhrase
+    }
+
     /// 同一主机（域名或 IP，不含路径）下最多保存 3 个**不同用户名**；相同主机 + 相同用户名则覆盖（保留 id、备注）。
     /// 网站字段为空时不受「每主机三条」限制。
     func add(_ item: PasswordItem) throws {
@@ -149,6 +170,7 @@ final class VaultStore: ObservableObject {
             merged.username = item.username
             merged.password = item.password
             merged.url = item.url
+            merged.notes = item.notes
             items[hit.offset] = merged
             let dupIds = group.filter { $0.offset != hit.offset && normalizedUsernameKey($0.element.username) == userKey }.map(\.element.id)
             items.removeAll { dupIds.contains($0.id) }
