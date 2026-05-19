@@ -8,6 +8,7 @@ extension PasswordItem {
             username,
             url,
             notes,
+            siteEndpoint ?? "",
             Self.hostHint(for: url),
         ]
         for f in customFields {

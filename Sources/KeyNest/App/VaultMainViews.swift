@@ -16,21 +16,18 @@ private enum VaultListLayoutMode: String, CaseIterable {
 
 struct MainVaultView: View {
     @EnvironmentObject private var vault: VaultStore
+    @EnvironmentObject private var settings: AppSettingsStore
     @EnvironmentObject private var usage: EntryUsageStore
 
     @AppStorage("bridgeEnabled") private var bridgeEnabled = true
+    @State private var showingSettings = false
     @State private var selection: UUID?
     @State private var showingAdd = false
     @State private var editingItem: PasswordItem?
     @State private var deleteError: String?
-    @State private var confirmRotateRecovery = false
-    @State private var rotatedRecoveryKeyToShow: String?
-    @State private var rotateRecoveryError: String?
     @State private var searchText = ""
     @State private var listFilter: VaultListFilter = .all
     @State private var layoutMode: VaultListLayoutMode = .flat
-    @State private var mergeNotice: String?
-
     private var searchTokens: [String] {
         searchText.split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.isEmpty }
     }
@@ -64,17 +61,27 @@ struct MainVaultView: View {
         return list.sorted(by: sortPair)
     }
 
+    private func identityKey(for item: PasswordItem) -> String {
+        SiteIdentityService.getIdentityKey(
+            url: item.url,
+            siteEndpoint: item.siteEndpoint,
+            distinguishByIp: settings.distinguishHostsByIp
+        ) ?? "__none__"
+    }
+
     private var groupedSections: [(hostKey: String, title: String, items: [PasswordItem])] {
         let items = displayItems
         var dict: [String: [PasswordItem]] = [:]
         var order: [String] = []
         for it in items {
-            let key = VaultStore.normalizedSiteHostKey(it.url) ?? "__none__"
+            let key = identityKey(for: it)
             if dict[key] == nil { order.append(key) }
             dict[key, default: []].append(it)
         }
         return order.map { k in
-            let title = k == "__none__" ? "无网站" : k
+            let title = k == "__none__"
+                ? "无网站"
+                : SiteIdentityService.formatGroupTitle(k)
             let sorted = dict[k]!.sorted(by: sortPair)
             return (hostKey: k, title: title, items: sorted)
         }
@@ -103,19 +110,12 @@ struct MainVaultView: View {
                     }
                     .help("添加条目")
 
-                    Menu("整理", systemImage: "arrow.3.trianglepath") {
-                        Button("合并重复（同站点同用户名）") {
-                            runMergeDuplicates()
-                        }
-                    }
-                    .help("批量整理")
-
                     Button {
-                        confirmRotateRecovery = true
+                        showingSettings = true
                     } label: {
-                        Label("更换恢复密钥", systemImage: "key.rotate.fill")
+                        Label("设置", systemImage: "gearshape")
                     }
-                    .help("生成新恢复密钥短语，旧短语立即作废")
+                    .help("保管库上限、hosts 环境区分、合并重复与恢复密钥")
 
                     Button {
                         vault.lock()
@@ -126,24 +126,6 @@ struct MainVaultView: View {
                     .help("锁定保管库")
                 }
             }
-            .confirmationDialog(
-                "更换恢复密钥",
-                isPresented: $confirmRotateRecovery,
-                titleVisibility: .visible
-            ) {
-                Button("确定更换", role: .destructive) {
-                    rotateRecoveryError = nil
-                    do {
-                        let phrase = try vault.rotateRecoveryKey()
-                        rotatedRecoveryKeyToShow = phrase
-                    } catch {
-                        rotateRecoveryError = error.localizedDescription
-                    }
-                }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("更换成功后，旧恢复密钥将立即失效，无法再用于找回主密码。请务必保存即将展示的新密钥。")
-            }
             .alert("删除失败", isPresented: Binding(
                 get: { deleteError != nil },
                 set: { if !$0 { deleteError = nil } }
@@ -151,22 +133,6 @@ struct MainVaultView: View {
                 Button("好", role: .cancel) { deleteError = nil }
             } message: {
                 Text(deleteError ?? "")
-            }
-            .alert("更换恢复密钥失败", isPresented: Binding(
-                get: { rotateRecoveryError != nil },
-                set: { if !$0 { rotateRecoveryError = nil } }
-            )) {
-                Button("好", role: .cancel) { rotateRecoveryError = nil }
-            } message: {
-                Text(rotateRecoveryError ?? "")
-            }
-            .alert("整理结果", isPresented: Binding(
-                get: { mergeNotice != nil },
-                set: { if !$0 { mergeNotice = nil } }
-            )) {
-                Button("好", role: .cancel) { mergeNotice = nil }
-            } message: {
-                Text(mergeNotice ?? "")
             }
             .frame(minWidth: 280)
         } detail: {
@@ -189,22 +155,14 @@ struct MainVaultView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .sheet(isPresented: Binding(
-            get: { rotatedRecoveryKeyToShow != nil },
-            set: { if !$0 { rotatedRecoveryKeyToShow = nil } }
-        )) {
-            RecoveryKeySetupSheet(
-                recoveryKey: rotatedRecoveryKeyToShow ?? "",
-                headline: "请保存新的恢复密钥",
-                detail: "旧的恢复密钥已失效，找回主密码仅能使用下列新密钥。请立即复制并妥善保管。",
-                onConfirm: { rotatedRecoveryKeyToShow = nil }
-            )
-        }
         .sheet(isPresented: $showingAdd) {
             ItemEditorSheet(mode: .add)
         }
         .sheet(item: $editingItem) { item in
             ItemEditorSheet(mode: .edit(item))
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
         }
         .safeAreaInset(edge: .bottom) {
             HStack {
@@ -378,7 +336,7 @@ struct MainVaultView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            let site = Self.sidebarSiteAddress(for: item)
+            let site = sidebarSiteAddress(for: item)
             if !site.isEmpty {
                 Text(site)
                     .font(.caption)
@@ -396,16 +354,6 @@ struct MainVaultView: View {
             try vault.toggleFavorite(id: item.id)
         } catch {
             deleteError = error.localizedDescription
-        }
-    }
-
-    private func runMergeDuplicates() {
-        do {
-            let n = try vault.mergeDuplicateHostUsernames()
-            mergeNotice =
-                n > 0 ? "已合并删除 \(n) 条重复条目（同站点同用户名仅保留最新一条）。" : "当前没有可合并的重复条目。"
-        } catch {
-            mergeNotice = error.localizedDescription
         }
     }
 
@@ -460,16 +408,11 @@ struct MainVaultView: View {
         }
     }
 
-    private static func sidebarSiteAddress(for item: PasswordItem) -> String {
-        let trimmed = item.url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-        var s = trimmed
-        if !s.contains("://") {
-            s = "https://" + s
-        }
-        if let host = URL(string: s)?.host, !host.isEmpty {
-            return host
-        }
-        return trimmed
+    private func sidebarSiteAddress(for item: PasswordItem) -> String {
+        SiteIdentityService.formatSiteDisplay(
+            url: item.url,
+            siteEndpoint: item.siteEndpoint,
+            distinguishByIp: settings.distinguishHostsByIp
+        )
     }
 }

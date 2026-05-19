@@ -235,6 +235,7 @@ private struct RecoveryUnlockSheet: View {
 
 struct ItemDetailView: View {
     @EnvironmentObject private var vault: VaultStore
+    @EnvironmentObject private var settings: AppSettingsStore
     @EnvironmentObject private var usage: EntryUsageStore
 
     let item: PasswordItem
@@ -256,6 +257,20 @@ struct ItemDetailView: View {
                             Text("—")
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .trailing)
+                        } else if settings.distinguishHostsByIp,
+                                  let ep = SiteIdentityService.normalizeEndpoint(item.siteEndpoint),
+                                  !ep.isEmpty {
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text(item.url)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .multilineTextAlignment(.trailing)
+                                Text("环境 IP：\(ep)")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .trailing)
                         } else {
                             Text(item.url)
                                 .font(.callout)
@@ -442,6 +457,7 @@ enum ItemEditorMode: Identifiable {
 
 struct ItemEditorSheet: View {
     @EnvironmentObject private var vault: VaultStore
+    @EnvironmentObject private var settings: AppSettingsStore
     @Environment(\.dismiss) private var dismiss
 
     let mode: ItemEditorMode
@@ -450,6 +466,7 @@ struct ItemEditorSheet: View {
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var url: String = ""
+    @State private var siteEndpoint: String = ""
     @State private var notes: String = ""
     @State private var customFields: [CustomField] = []
     @State private var isFavorite: Bool = false
@@ -470,6 +487,14 @@ struct ItemEditorSheet: View {
                     }
                     TextField("网站（域名或完整 URL；填充时按主机名匹配）", text: $url)
                         .multilineTextAlignment(.trailing)
+                    if settings.distinguishHostsByIp {
+                        TextField("环境 IP（hosts 解析，可留空自动填入）", text: $siteEndpoint)
+                            .font(.system(.body, design: .monospaced))
+                        Button("从网站解析当前 IP") {
+                            siteEndpoint = SiteIdentityService.resolveEndpointForUrl(url) ?? ""
+                        }
+                        .font(.caption)
+                    }
                 }
                 Section {
                     ForEach($customFields) { $field in
@@ -548,6 +573,7 @@ struct ItemEditorSheet: View {
             username = item.username
             password = item.password
             url = item.url
+            siteEndpoint = item.siteEndpoint ?? ""
             notes = item.notes
             customFields = item.customFields
             isFavorite = item.isFavorite
@@ -602,6 +628,11 @@ struct ItemEditorSheet: View {
         let trimmedFields = customFields.map {
             CustomField(id: $0.id, label: $0.label.trimmingCharacters(in: .whitespacesAndNewlines), value: $0.value)
         }.filter { !$0.label.isEmpty || !$0.value.isEmpty }
+        var ep = siteEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if settings.distinguishHostsByIp, ep.isEmpty, !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            ep = SiteIdentityService.resolveEndpointForUrl(url) ?? ""
+        }
+        let endpointStored: String? = ep.isEmpty ? nil : ep
         do {
             switch mode {
             case .add:
@@ -611,6 +642,7 @@ struct ItemEditorSheet: View {
                         username: username,
                         password: password,
                         url: url,
+                        siteEndpoint: endpointStored,
                         notes: notes,
                         customFields: trimmedFields,
                         isFavorite: isFavorite
@@ -624,6 +656,7 @@ struct ItemEditorSheet: View {
                         username: username,
                         password: password,
                         url: url,
+                        siteEndpoint: endpointStored,
                         notes: notes,
                         customFields: trimmedFields,
                         isFavorite: isFavorite

@@ -3,14 +3,25 @@ import SwiftUI
 
 @main
 struct KeyNestApp: App {
-    @StateObject private var vault = VaultStore()
+    @StateObject private var settings: AppSettingsStore
+    @StateObject private var vault: VaultStore
     @StateObject private var bridge = LocalTCPBridge()
     @StateObject private var entryUsage = EntryUsageStore()
     @AppStorage("bridgeEnabled") private var bridgeEnabled = true
 
+    init() {
+        if !SingleInstanceGuard.activateExistingIfNeeded() {
+            exit(0)
+        }
+        let settingsStore = AppSettingsStore()
+        _settings = StateObject(wrappedValue: settingsStore)
+        _vault = StateObject(wrappedValue: VaultStore(settings: settingsStore))
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(settings)
                 .environmentObject(vault)
                 .environmentObject(bridge)
                 .environmentObject(entryUsage)
@@ -29,6 +40,7 @@ struct KeyNestApp: App {
 
         MenuBarExtra("KeyNest", systemImage: "key.horizontal.fill") {
             KeyNestMenuBarExtraContent()
+                .environmentObject(settings)
                 .environmentObject(vault)
                 .environmentObject(bridge)
                 .environmentObject(entryUsage)

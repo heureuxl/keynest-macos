@@ -245,7 +245,8 @@ final class LocalTCPBridge: ObservableObject {
                     username: username,
                     password: password,
                     url: urlStr
-                )
+                ),
+                pageURL: urlStr
             )
             sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":true}"#.utf8), json: true)
         } catch {

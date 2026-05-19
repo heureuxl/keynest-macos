@@ -31,8 +31,10 @@ final class VaultStore: ObservableObject {
     private var vaultWrappedRecovery: Data?
 
     private let vaultURL: URL
+    private let settings: AppSettingsStore
 
-    init() {
+    init(settings: AppSettingsStore) {
+        self.settings = settings
         let fm = FileManager.default
         let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let newDir = appSupport.appendingPathComponent("KeyNest", isDirectory: true)
@@ -145,24 +147,59 @@ final class VaultStore: ObservableObject {
         return recoveryPhrase
     }
 
-    /// 同一主机（域名或 IP，不含路径）下最多保存 3 个**不同用户名**；相同主机 + 相同用户名则覆盖（保留 id、备注）。
-    /// 网站字段为空时不受「每主机三条」限制。
-    func add(_ item: PasswordItem) throws {
-        try addOrReplaceBySiteHost(item)
+    /// 同一站点环境（可选按 hosts IP 区分）下最多保存 N 个**不同用户名**；相同站点 + 相同用户名则覆盖。
+    /// 网站字段为空时不受「每站点上限」限制。
+    func add(_ item: PasswordItem, pageURL: String? = nil) throws {
+        var copy = item
+        applyAutoSiteEndpoint(&copy, pageURL: pageURL)
+        try mergeIncomingBySiteHost(copy)
+    }
+
+    func update(_ item: PasswordItem) throws {
+        var copy = item
+        applyAutoSiteEndpoint(&copy)
+        guard let i = items.firstIndex(where: { $0.id == copy.id }) else { return }
+        items[i] = copy
+        try persistVaultV2()
+    }
+
+    /// 设置变更后按当前规则收紧每站点账号上限并落盘。
+    func enforceLimitsAndPersist() throws {
+        guard isUnlocked else { throw VaultStoreError.notUnlocked }
+        dedupeSameHostSameUsername()
+        enforceMaxAccountsPerSiteURL()
+        try persistVaultV2WithoutLimitsPass()
     }
 
     private func normalizedUsernameKey(_ username: String) -> String {
         username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private func addOrReplaceBySiteHost(_ item: PasswordItem) throws {
-        guard let hostKey = Self.normalizedSiteHostKey(item.url) else {
+    private func siteIdentityKey(for item: PasswordItem) -> String? {
+        SiteIdentityService.getIdentityKey(
+            url: item.url,
+            siteEndpoint: item.siteEndpoint,
+            distinguishByIp: settings.distinguishHostsByIp
+        )
+    }
+
+    private func applyAutoSiteEndpoint(_ item: inout PasswordItem, pageURL: String? = nil) {
+        guard settings.distinguishHostsByIp else { return }
+        if let ep = SiteIdentityService.normalizeEndpoint(item.siteEndpoint), !ep.isEmpty { return }
+        let resolved = SiteIdentityService.resolveEndpointForUrl(pageURL ?? item.url)
+        if let resolved, !resolved.isEmpty {
+            item.siteEndpoint = resolved
+        }
+    }
+
+    private func mergeIncomingBySiteHost(_ item: PasswordItem) throws {
+        guard let siteKey = siteIdentityKey(for: item) else {
             items.append(item)
             try persistVaultV2()
             return
         }
         let userKey = normalizedUsernameKey(item.username)
-        let group = items.enumerated().filter { Self.normalizedSiteHostKey($0.element.url) == hostKey }
+        let group = items.enumerated().filter { siteIdentityKey(for: $0.element) == siteKey }
 
         if let hit = group.first(where: { normalizedUsernameKey($0.element.username) == userKey }) {
             var merged = hit.element
@@ -170,10 +207,12 @@ final class VaultStore: ObservableObject {
             merged.username = item.username
             merged.password = item.password
             merged.url = item.url
+            merged.siteEndpoint = item.siteEndpoint
             merged.notes = item.notes
             if !item.customFields.isEmpty {
                 merged.customFields = item.customFields
             }
+            merged.isFavorite = item.isFavorite
             items[hit.offset] = merged
             let dupIds = group.filter { $0.offset != hit.offset && normalizedUsernameKey($0.element.username) == userKey }.map(\.element.id)
             items.removeAll { dupIds.contains($0.id) }
@@ -181,7 +220,8 @@ final class VaultStore: ObservableObject {
             return
         }
 
-        if group.count >= 3 {
+        let maxN = settings.maxAccountsPerSiteHost
+        if group.count >= maxN {
             guard let oldest = group.min(by: { $0.offset < $1.offset }) else {
                 items.append(item)
                 try persistVaultV2()
@@ -195,28 +235,30 @@ final class VaultStore: ObservableObject {
 
     /// 与 `add`、扩展填充一致：仅用**主机名**（域名或 IP，小写）作为站点键，不含路径、查询、端口。
     static func normalizedSiteHostKey(_ raw: String) -> String? {
-        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return nil }
-        var s = t
-        if !s.contains("://") {
-            s = "https://" + s
-        }
-        guard let url = URL(string: s), let host = url.host, !host.isEmpty else {
-            return nil
-        }
-        return host.lowercased()
+        SiteIdentityService.normalizedHost(raw)
     }
 
-    private static func hostsMatch(pageHost: String, credentialHost: String) -> Bool {
-        pageHost == credentialHost
-            || pageHost.hasSuffix("." + credentialHost)
-            || credentialHost.hasSuffix("." + pageHost)
+    private static func canonicalHostForMatch(_ host: String) -> String {
+        let h = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if h.hasPrefix("www.") { return String(h.dropFirst(4)) }
+        return h
     }
 
-    func update(_ item: PasswordItem) throws {
-        guard let i = items.firstIndex(where: { $0.id == item.id }) else { return }
-        items[i] = item
-        try persistVaultV2()
+    private static func approxRegistrableDomain(_ host: String) -> String? {
+        let parts = host.split(separator: ".").map(String.init)
+        guard parts.count >= 2 else { return nil }
+        return "\(parts[parts.count - 2]).\(parts[parts.count - 1])"
+    }
+
+    static func hostsMatch(pageHost: String, credentialHost: String) -> Bool {
+        let p = canonicalHostForMatch(pageHost)
+        let i = canonicalHostForMatch(credentialHost)
+        if p == i { return true }
+        if p.hasSuffix("." + i) || i.hasSuffix("." + p) { return true }
+        if let rp = approxRegistrableDomain(p), let ri = approxRegistrableDomain(i), rp == ri {
+            return true
+        }
+        return false
     }
 
     func remove(id: UUID) throws {
@@ -247,16 +289,18 @@ final class VaultStore: ObservableObject {
         return hit.password == password
     }
 
-    /// 按当前页与条目「网站」字段的**主机名**（域名或 IP）匹配；支持子域与根域的互相包含关系。
+    /// 按当前页与条目网站匹配；开启 IP 区分时还要求 hosts 解析环境一致。
     func matches(forPageURL pageURL: String) -> [PasswordItem] {
-        guard let pageHost = Self.normalizedSiteHostKey(pageURL) else {
-            return []
-        }
+        guard Self.normalizedSiteHostKey(pageURL) != nil else { return [] }
         let matched = items.filter { item in
-            guard !item.url.isEmpty, let h = Self.normalizedSiteHostKey(item.url) else {
-                return false
-            }
-            return Self.hostsMatch(pageHost: pageHost, credentialHost: h)
+            guard !item.url.isEmpty else { return false }
+            return SiteIdentityService.contextsMatch(
+                pageUrl: pageURL,
+                itemUrl: item.url,
+                itemSiteEndpoint: item.siteEndpoint,
+                distinguishByIp: settings.distinguishHostsByIp,
+                hostsMatch: Self.hostsMatch
+            )
         }
         return matched.sorted {
             $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending
@@ -388,6 +432,10 @@ final class VaultStore: ObservableObject {
     private func persistVaultV2() throws {
         dedupeSameHostSameUsername()
         enforceMaxAccountsPerSiteURL()
+        try persistVaultV2WithoutLimitsPass()
+    }
+
+    private func persistVaultV2WithoutLimitsPass() throws {
         guard let password = masterPassword,
               let dataKey = sessionDataKey,
               let saltM = vaultSaltMaster,
@@ -423,20 +471,20 @@ final class VaultStore: ObservableObject {
         try data.write(to: vaultURL, options: .atomic)
     }
 
-    /// 合并重复条目：同一主机键 + 同一用户名只保留**最后一次出现**（有 URL 主机时才参与；网站为空的条目互不合并）。
+    /// 合并重复条目：同一站点身份 + 同一用户名只保留**最后一次出现**。
     private func dedupeSameHostSameUsername() {
         var keyToLastIndex: [String: Int] = [:]
         for (idx, it) in items.enumerated() {
-            guard let hk = Self.normalizedSiteHostKey(it.url) else { continue }
+            guard let sk = siteIdentityKey(for: it) else { continue }
             let uk = normalizedUsernameKey(it.username)
-            let key = hk + "\u{1f}" + uk
+            let key = sk + "\u{1f}" + uk
             keyToLastIndex[key] = idx
         }
         var removeIds = Set<UUID>()
         for (idx, it) in items.enumerated() {
-            guard let hk = Self.normalizedSiteHostKey(it.url) else { continue }
+            guard let sk = siteIdentityKey(for: it) else { continue }
             let uk = normalizedUsernameKey(it.username)
-            let key = hk + "\u{1f}" + uk
+            let key = sk + "\u{1f}" + uk
             if let keepIdx = keyToLastIndex[key], keepIdx != idx {
                 removeIds.insert(it.id)
             }
@@ -446,13 +494,14 @@ final class VaultStore: ObservableObject {
         }
     }
 
-    /// 落盘前收紧：同一主机（域名或 IP）最多 3 条不同用户名；同用户名保留最后一次出现。
+    /// 落盘前收紧：同一站点环境最多 N 条不同用户名；同用户名保留最后一次出现。
     private func enforceMaxAccountsPerSiteURL() {
         let snapshot = items
+        let maxN = settings.maxAccountsPerSiteHost
         var groups: [String: [PasswordItem]] = [:]
         var keyOrder: [String] = []
         for it in snapshot {
-            guard let k = Self.normalizedSiteHostKey(it.url) else { continue }
+            guard let k = siteIdentityKey(for: it) else { continue }
             if groups[k] == nil { keyOrder.append(k) }
             groups[k, default: []].append(it)
         }
@@ -464,13 +513,13 @@ final class VaultStore: ObservableObject {
                 let uk = normalizedUsernameKey(it.username)
                 if let i = pick.firstIndex(where: { normalizedUsernameKey($0.username) == uk }) {
                     pick[i] = it
-                } else if pick.count < 3 {
+                } else if pick.count < maxN {
                     pick.append(it)
                 }
             }
             pick.forEach { keep.insert($0.id) }
         }
-        for it in snapshot where Self.normalizedSiteHostKey(it.url) == nil {
+        for it in snapshot where siteIdentityKey(for: it) == nil {
             keep.insert(it.id)
         }
         let next = snapshot.filter { keep.contains($0.id) }
