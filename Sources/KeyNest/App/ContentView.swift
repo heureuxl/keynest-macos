@@ -461,7 +461,10 @@ struct ItemEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let mode: ItemEditorMode
+    var onSiteLimitRequired: ((SiteLimitSavePrompt, PasswordItem) -> Void)? = nil
 
+    @State private var siteLimitPrompt: SiteLimitSavePrompt?
+    @State private var pendingAddItem: PasswordItem?
     @State private var title: String = ""
     @State private var username: String = ""
     @State private var password: String = ""
@@ -554,7 +557,38 @@ struct ItemEditorSheet: View {
                 }
             }
             .onAppear(perform: load)
+            .confirmationDialog(
+                "站点账号已达上限",
+                isPresented: Binding(
+                    get: { siteLimitPrompt != nil },
+                    set: { if !$0 { siteLimitPrompt = nil; pendingAddItem = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("继续保存", role: .destructive) {
+                    confirmLimitAndSave()
+                }
+                Button("取消", role: .cancel) {
+                    siteLimitPrompt = nil
+                    pendingAddItem = nil
+                }
+            } message: {
+                Text(siteLimitPrompt?.message ?? "")
+            }
         }
+    }
+
+    private func confirmLimitAndSave() {
+        guard let item = pendingAddItem else { return }
+        do {
+            if try vault.add(item, allowEvictOldest: true) {
+                dismiss()
+            }
+        } catch {
+            errorText = error.localizedDescription
+        }
+        siteLimitPrompt = nil
+        pendingAddItem = nil
     }
 
     private var navTitle: String {
@@ -636,18 +670,32 @@ struct ItemEditorSheet: View {
         do {
             switch mode {
             case .add:
-                try vault.add(
-                    PasswordItem(
-                        title: title,
-                        username: username,
-                        password: password,
-                        url: url,
-                        siteEndpoint: endpointStored,
-                        notes: notes,
-                        customFields: trimmedFields,
-                        isFavorite: isFavorite
-                    )
+                let item = PasswordItem(
+                    title: title,
+                    username: username,
+                    password: password,
+                    url: url,
+                    siteEndpoint: endpointStored,
+                    notes: notes,
+                    customFields: trimmedFields,
+                    isFavorite: isFavorite
                 )
+                if let prompt = vault.siteLimitSavePrompt(for: item) {
+                    if let cb = onSiteLimitRequired {
+                        cb(prompt, item)
+                        return
+                    }
+                    siteLimitPrompt = prompt
+                    pendingAddItem = item
+                    return
+                }
+                guard try vault.add(item) else {
+                    if let prompt = vault.siteLimitSavePrompt(for: item) {
+                        siteLimitPrompt = prompt
+                        pendingAddItem = item
+                    }
+                    return
+                }
             case .edit(let original):
                 try vault.update(
                     PasswordItem(

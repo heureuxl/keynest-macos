@@ -147,12 +147,53 @@ final class VaultStore: ObservableObject {
         return recoveryPhrase
     }
 
-    /// 同一站点环境（可选按 hosts IP 区分）下最多保存 N 个**不同用户名**；相同站点 + 相同用户名则覆盖。
-    /// 网站字段为空时不受「每站点上限」限制。
-    func add(_ item: PasswordItem, pageURL: String? = nil) throws {
+    /// 新增用户名且已达站点上限时返回确认信息；更新已有用户名或未满则不返回。
+    func siteLimitSavePrompt(for item: PasswordItem, pageURL: String? = nil) -> SiteLimitSavePrompt? {
+        guard isUnlocked else { return nil }
         var copy = item
         applyAutoSiteEndpoint(&copy, pageURL: pageURL)
-        try mergeIncomingBySiteHost(copy)
+        guard let siteKey = siteIdentityKey(for: copy) else { return nil }
+
+        let userKey = normalizedUsernameKey(copy.username)
+        let group = items.filter { siteIdentityKey(for: $0) == siteKey }
+        if group.contains(where: { normalizedUsernameKey($0.username) == userKey }) {
+            return nil
+        }
+        let maxN = settings.maxAccountsPerSiteHost
+        if group.count < maxN {
+            return nil
+        }
+        guard let oldest = items.enumerated()
+            .filter({ siteIdentityKey(for: $0.element) == siteKey })
+            .min(by: { $0.offset < $1.offset })?
+        else { return nil }
+
+        return SiteLimitSavePrompt(
+            siteLabel: SiteIdentityService.formatGroupTitle(siteKey),
+            maxAccounts: maxN,
+            currentCount: group.count,
+            incomingUsername: copy.username,
+            evictTitle: oldest.element.title.isEmpty ? "未命名" : oldest.element.title,
+            evictUsername: oldest.element.username
+        )
+    }
+
+    /// 同一站点环境（可选按 hosts IP 区分）下最多保存 N 个**不同用户名**；相同站点 + 相同用户名则覆盖。
+    /// 网站字段为空时不受「每站点上限」限制。达上限且未确认时返回 `false`。
+    @discardableResult
+    func add(_ item: PasswordItem, pageURL: String? = nil, allowEvictOldest: Bool = false) throws -> Bool {
+        var copy = item
+        applyAutoSiteEndpoint(&copy, pageURL: pageURL)
+        return try mergeIncomingBySiteHost(copy, allowEvictOldest: allowEvictOldest)
+    }
+
+    func reorderItems(visibleIdsInOrder: [UUID]) throws {
+        let idSet = Set(visibleIdsInOrder)
+        let map = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        var next = visibleIdsInOrder.compactMap { map[$0] }
+        next.append(contentsOf: items.filter { !idSet.contains($0.id) })
+        items = next
+        try persistVaultV2()
     }
 
     func update(_ item: PasswordItem) throws {
@@ -192,11 +233,12 @@ final class VaultStore: ObservableObject {
         }
     }
 
-    private func mergeIncomingBySiteHost(_ item: PasswordItem) throws {
+    @discardableResult
+    private func mergeIncomingBySiteHost(_ item: PasswordItem, allowEvictOldest: Bool) throws -> Bool {
         guard let siteKey = siteIdentityKey(for: item) else {
             items.append(item)
             try persistVaultV2()
-            return
+            return true
         }
         let userKey = normalizedUsernameKey(item.username)
         let group = items.enumerated().filter { siteIdentityKey(for: $0.element) == siteKey }
@@ -217,20 +259,24 @@ final class VaultStore: ObservableObject {
             let dupIds = group.filter { $0.offset != hit.offset && normalizedUsernameKey($0.element.username) == userKey }.map(\.element.id)
             items.removeAll { dupIds.contains($0.id) }
             try persistVaultV2()
-            return
+            return true
         }
 
         let maxN = settings.maxAccountsPerSiteHost
         if group.count >= maxN {
+            if !allowEvictOldest {
+                return false
+            }
             guard let oldest = group.min(by: { $0.offset < $1.offset }) else {
                 items.append(item)
                 try persistVaultV2()
-                return
+                return true
             }
             items.removeAll { $0.id == oldest.element.id }
         }
         items.append(item)
         try persistVaultV2()
+        return true
     }
 
     /// 与 `add`、扩展填充一致：仅用**主机名**（域名或 IP，小写）作为站点键，不含路径、查询、端口。

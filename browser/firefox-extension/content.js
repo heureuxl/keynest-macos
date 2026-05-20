@@ -5,11 +5,56 @@
  */
 const BRIDGE = "http://127.0.0.1:17373/api/credentials";
 const SAVE_BRIDGE = "http://127.0.0.1:17373/api/save";
+const LIMIT_CHECK_BRIDGE = "http://127.0.0.1:17373/api/site-limit-check";
+
+/** @returns {Promise<{ needsConfirm: boolean, maxAccounts?: number, currentCount?: number, siteLabel?: string, evictTitle?: string, evictUsername?: string, incomingUsername?: string } | null>} */
+async function fetchSiteLimitCheck(url, username) {
+  try {
+    const q = new URL(LIMIT_CHECK_BRIDGE);
+    q.searchParams.set("url", url);
+    q.searchParams.set("username", username || "");
+    const res = await fetch(q);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+function formatSiteLimitConfirmMessage(limit) {
+  const site = limit.siteLabel || location.hostname;
+  const max = limit.maxAccounts ?? 3;
+  const count = limit.currentCount ?? max;
+  const incoming = String(limit.incomingUsername || "").trim() || "（无用户名）";
+  const evictTitle = limit.evictTitle || "未命名";
+  const evictUser = String(limit.evictUsername || "").trim() || "（无用户名）";
+  return (
+    `网站「${site}」已保存 ${count} 个不同账号（上限 ${max} 个）。\n\n` +
+    `继续保存「${incoming}」将移除最早条目：\n${evictTitle}（${evictUser}）\n\n是否继续保存？`
+  );
+}
+
+/** @param {{ needsConfirm?: boolean }} limit */
+async function confirmSiteLimitIfNeeded(limit) {
+  if (!limit?.needsConfirm) return true;
+  return confirm(formatSiteLimitConfirmMessage(limit));
+}
 const WRAP_ID = "__keynest_fill_wrap__";
 const HINT_ID = "__keynest_hint__";
 
 /** @param {{ title?: string, url: string, username: string, password: string }} payload */
 async function runSaveOffer(payload) {
+  if (globalThis.__knSaveOfferRunning) return;
+  globalThis.__knSaveOfferRunning = true;
+  try {
+    await runSaveOfferInner(payload);
+  } finally {
+    globalThis.__knSaveOfferRunning = false;
+  }
+}
+
+/** @param {{ title?: string, url: string, username: string, password: string }} payload */
+async function runSaveOfferInner(payload) {
   const password = String(payload.password || "").trim();
   if (!password) return;
 
@@ -91,6 +136,10 @@ async function runSaveOffer(payload) {
   }
 
   if (shouldPost) {
+    const pageUrl = payload.url || location.href;
+    const limit = await fetchSiteLimitCheck(pageUrl, uname);
+    if (!(await confirmSiteLimitIfNeeded(limit || {}))) return;
+
     try {
       sessionStorage.setItem(dedupe, String(now));
     } catch (_) {}
@@ -99,9 +148,10 @@ async function runSaveOffer(payload) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: payload.title || document.title || "",
-        url: payload.url || location.href,
+        url: pageUrl,
         username: uname,
         password,
+        confirmEvict: !!(limit && limit.needsConfirm),
       }),
       keepalive: true,
     }).catch(() => {});
@@ -187,13 +237,67 @@ function looksLikeLoginButton(el) {
   return false;
 }
 
-function scheduleSnapshotSave() {
+/** 在站点改写密码框为密文之前同步抓取（登录按钮 mousedown/click 的 capture 阶段） */
+function capturePendingSaveSnapshot() {
+  const snapAll = globalThis.__keynestSnapshotPlainPasswords;
+  if (typeof snapAll === "function") snapAll();
+  const snapFn = globalThis.__keynestCollectLoginSnapshot;
+  if (typeof snapFn !== "function") return;
+  const snap = snapFn();
+  if (!snap || !String(snap.password || "").trim()) return;
+  globalThis.__keynestPendingSaveSnapshot = {
+    username: snap.username || "",
+    password: snap.password,
+    capturedAt: Date.now(),
+  };
+}
+
+function pickSaveSnapshot() {
+  const pending = globalThis.__keynestPendingSaveSnapshot;
+  const looksCipher = globalThis.__keynestLooksLikeSiteCiphertext;
+  const snapFn = globalThis.__keynestCollectLoginSnapshot;
+
+  if (pending && Date.now() - pending.capturedAt < 8000) {
+    const pwd = String(pending.password || "").trim();
+    if (pwd) {
+      if (typeof snapFn === "function") {
+        const fresh = snapFn();
+        const freshPwd = fresh ? String(fresh.password || "").trim() : "";
+        if (
+          freshPwd &&
+          typeof looksCipher === "function" &&
+          looksCipher(freshPwd, pwd) &&
+          !looksCipher(pwd, freshPwd)
+        ) {
+          return {
+            username: pending.username || fresh?.username || "",
+            password: pwd,
+          };
+        }
+      }
+      return { username: pending.username || "", password: pwd };
+    }
+  }
+
+  if (typeof snapFn !== "function") return null;
+  const snap = snapFn();
+  if (!snap || !String(snap.password || "").trim()) return null;
+  return { username: snap.username || "", password: snap.password };
+}
+
+function cancelScheduledSnapshotSave() {
   clearTimeout(globalThis.__keynestSaveDebounce);
+  globalThis.__keynestSaveDebounce = null;
+}
+
+function scheduleSnapshotSave() {
+  if (Date.now() - (globalThis.__knSaveOfferHandledAt || 0) < 2500) return;
+  cancelScheduledSnapshotSave();
   globalThis.__keynestSaveDebounce = setTimeout(() => {
-    const snapFn = globalThis.__keynestCollectLoginSnapshot;
-    if (typeof snapFn !== "function") return;
-    const snap = snapFn();
-    if (!snap || !String(snap.password || "").trim()) return;
+    if (Date.now() - (globalThis.__knSaveOfferHandledAt || 0) < 2500) return;
+    const snap = pickSaveSnapshot();
+    if (!snap) return;
+    delete globalThis.__keynestPendingSaveSnapshot;
     if (!String(snap.username || "").trim()) {
       showKeynestHint(
         "KeyNest：未检测到账号输入框内容。若网站用手机号登录，请先填写手机号再点登录；也可之后在桌面端补充用户名。"
@@ -205,20 +309,38 @@ function scheduleSnapshotSave() {
       username: snap.username || "",
       password: snap.password,
     });
-  }, 480);
+  }, 320);
 }
 
-document.addEventListener(
-  "click",
-  (ev) => {
-    const t = ev.target;
-    if (!(t instanceof Element)) return;
-    if (isOurUiElement(t)) return;
-    if (!looksLikeLoginButton(t)) return;
-    scheduleSnapshotSave();
-  },
-  true
-);
+/** 点击是否会走经典 form submit（由 submit 监听统一弹窗，避免重复） */
+function willTriggerFormSubmitFromClick(el) {
+  const form = el.closest?.("form");
+  if (!(form instanceof HTMLFormElement)) return false;
+  if (!tpLooksLikeClassicPasswordLogin(form)) return false;
+  let node = el;
+  for (let i = 0; i < 8 && node; i++) {
+    const tag = (node.tagName || "").toLowerCase();
+    if (tag === "button") {
+      const type = (node.getAttribute("type") || "submit").toLowerCase();
+      return type === "submit" || type === "";
+    }
+    if (tag === "input" && (node.getAttribute("type") || "").toLowerCase() === "submit") return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
+function onLoginSubmitIntent(ev) {
+  const t = ev.target;
+  if (!(t instanceof Element)) return;
+  if (isOurUiElement(t)) return;
+  if (!looksLikeLoginButton(t)) return;
+  capturePendingSaveSnapshot();
+  if (willTriggerFormSubmitFromClick(t)) return;
+  scheduleSnapshotSave();
+}
+
+document.addEventListener("mousedown", onLoginSubmitIntent, true);
 
 document.addEventListener(
   "keydown",
@@ -229,6 +351,7 @@ document.addEventListener(
     if (t.isContentEditable) return;
     if (t instanceof HTMLTextAreaElement) return;
     if (t instanceof HTMLInputElement && t.type === "password") {
+      capturePendingSaveSnapshot();
       scheduleSnapshotSave();
     }
   },
@@ -313,6 +436,9 @@ document.addEventListener(
     if (!(form instanceof HTMLFormElement)) return;
     if (!tpLooksLikeClassicPasswordLogin(form)) return;
 
+    const snapAll = globalThis.__keynestSnapshotPlainPasswords;
+    if (typeof snapAll === "function") snapAll();
+
     ev.preventDefault();
 
     const passwordEl = tpFindLoginPasswordInput(form);
@@ -329,6 +455,8 @@ document.addEventListener(
       password,
     };
 
+    cancelScheduledSnapshotSave();
+    globalThis.__knSaveOfferHandledAt = Date.now();
     await runSaveOffer(payload);
 
     const sub = ev.submitter;

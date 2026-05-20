@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import Network
@@ -20,6 +21,7 @@ struct BridgeSavePayload: Codable {
     var url: String
     var username: String
     var password: String
+    var confirmEvict: Bool = false
 }
 
 @MainActor
@@ -175,8 +177,17 @@ final class LocalTCPBridge: ObservableObject {
             }
             let pathAndQuery = String(parts[1])
             guard let u = URL(string: "http://127.0.0.1\(pathAndQuery)"),
-                  let components = URLComponents(url: u, resolvingAgainstBaseURL: false),
-                  let items = components.queryItems,
+                  let components = URLComponents(url: u, resolvingAgainstBaseURL: false)
+            else {
+                sendHTTP(connection: connection, status: 400, body: Data(#"{"error":"missing url query"}"#.utf8), json: true)
+                return
+            }
+            let pathOnly = pathAndQuery.split(separator: "?").first.map(String.init) ?? pathAndQuery
+            if pathOnly == "/api/site-limit-check" || pathOnly.hasSuffix("/api/site-limit-check") {
+                respondSiteLimitCheck(connection: connection, components: components)
+                return
+            }
+            guard let items = components.queryItems,
                   let pageURL = items.first(where: { $0.name == "url" })?.value
             else {
                 sendHTTP(connection: connection, status: 400, body: Data(#"{"error":"missing url query"}"#.utf8), json: true)
@@ -238,20 +249,73 @@ final class LocalTCPBridge: ObservableObject {
             sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":true,"unchanged":true}"#.utf8), json: true)
             return
         }
+        let newItem = PasswordItem(
+            title: displayTitle,
+            username: username,
+            password: password,
+            url: urlStr
+        )
+        var allowEvict = payload.confirmEvict
+        if let prompt = vault.siteLimitSavePrompt(for: newItem, pageURL: urlStr), !allowEvict {
+            if !confirmSiteLimitOnMac(prompt: prompt) {
+                sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":false,"cancelled":true}"#.utf8), json: true)
+                return
+            }
+            allowEvict = true
+        }
         do {
-            try vault.add(
-                PasswordItem(
-                    title: displayTitle,
-                    username: username,
-                    password: password,
-                    url: urlStr
-                ),
-                pageURL: urlStr
-            )
+            let saved = try vault.add(newItem, pageURL: urlStr, allowEvictOldest: allowEvict)
+            if !saved {
+                sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":false,"cancelled":true}"#.utf8), json: true)
+                return
+            }
             sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":true}"#.utf8), json: true)
         } catch {
             sendHTTP(connection: connection, status: 500, body: Data(#"{"error":"save failed"}"#.utf8), json: true)
         }
+    }
+
+    private func confirmSiteLimitOnMac(prompt: SiteLimitSavePrompt) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "KeyNest"
+        alert.informativeText = prompt.message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "继续保存")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func respondSiteLimitCheck(connection: NWConnection, components: URLComponents) {
+        guard let vault else {
+            sendHTTP(connection: connection, status: 503, body: Data(#"{"error":"vault not attached"}"#.utf8), json: true)
+            return
+        }
+        guard vault.isUnlocked else {
+            sendHTTP(connection: connection, status: 503, body: Data(#"{"error":"vault locked"}"#.utf8), json: true)
+            return
+        }
+        guard let pageURL = components.queryItems?.first(where: { $0.name == "url" })?.value else {
+            sendHTTP(connection: connection, status: 400, body: Data(#"{"error":"missing url query"}"#.utf8), json: true)
+            return
+        }
+        let username = components.queryItems?.first(where: { $0.name == "username" })?.value ?? ""
+        let probe = PasswordItem(title: "", username: username, password: "x", url: pageURL)
+        if let prompt = vault.siteLimitSavePrompt(for: probe, pageURL: pageURL) {
+            let check = BridgeSiteLimitCheck(
+                needsConfirm: true,
+                maxAccounts: prompt.maxAccounts,
+                currentCount: prompt.currentCount,
+                siteLabel: prompt.siteLabel,
+                evictTitle: prompt.evictTitle,
+                evictUsername: prompt.evictUsername,
+                incomingUsername: prompt.incomingUsername
+            )
+            if let enc = try? JSONEncoder().encode(check) {
+                sendHTTP(connection: connection, status: 200, body: enc, json: true)
+                return
+            }
+        }
+        sendHTTP(connection: connection, status: 200, body: Data(#"{"needsConfirm":false}"#.utf8), json: true)
     }
 
     private func respondWithCredentials(connection: NWConnection, pageURL: String) {

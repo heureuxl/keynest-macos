@@ -44,12 +44,78 @@
     );
   }
 
-  /** 登录提交前部分站点会把密码框替换为 RSA/AES 等密文，此处记住用户输入的明文以便保存正确密码 */
+  /**
+   * 登录前记住明文：部分站点在点击登录后用 RSA/AES 等改写 input.value。
+   * WeakMap 按元素；Map 按表单上下文（站点常会替换 password 节点）。
+   */
   const plainPasswordMemo = new WeakMap();
+  const plainPasswordByContext = new Map();
+  const MAX_CONTEXT_ENTRIES = 12;
+
+  function getPasswordContextKey(el) {
+    const form = el.closest("form");
+    const formKey = form
+      ? String(form.id || form.name || form.getAttribute("action") || "").slice(0, 160)
+      : "";
+    return `${location.pathname}\n${formKey}`;
+  }
+
+  function pruneContextMap() {
+    while (plainPasswordByContext.size > MAX_CONTEXT_ENTRIES) {
+      const first = plainPasswordByContext.keys().next().value;
+      if (first === undefined) break;
+      plainPasswordByContext.delete(first);
+    }
+  }
+
+  /** @returns {boolean} domVal 是否相对 plainHint 更像站点加密后的串 */
+  function looksLikeSiteCiphertext(domVal, plainHint) {
+    if (!domVal || !plainHint || domVal === plainHint) return false;
+    const dr = domVal.length;
+    const rr = plainHint.length;
+    if (rr === 0) return false;
+    const domCompact = domVal.replace(/\s/g, "");
+    if (dr >= rr * 1.5 && dr >= rr + 12) return true;
+    if (dr >= rr * 2) return true;
+    if (dr >= rr + 16 && dr >= 24) return true;
+    if (dr >= rr + 24 && dr >= 32) return true;
+    if (dr >= 32 && /^[0-9a-f]{32,}$/i.test(domCompact)) return true;
+    if (
+      dr >= 36 &&
+      rr <= 128 &&
+      /^[A-Za-z0-9+/=_-]+$/.test(domCompact) &&
+      /[^A-Za-z0-9/+=_\-\s]/.test(plainHint)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function pickBetterPlain(prev, next) {
+    if (!next) return prev ?? "";
+    if (!prev) return next;
+    if (next === prev) return prev;
+    if (looksLikeSiteCiphertext(next, prev)) return prev;
+    if (looksLikeSiteCiphertext(prev, next)) return next;
+    return next.length <= prev.length ? next : prev;
+  }
 
   function rememberPlainPassword(el) {
     if (!(el instanceof HTMLInputElement) || el.type !== "password") return;
-    plainPasswordMemo.set(el, String(el.value ?? ""));
+    const next = String(el.value ?? "");
+    if (!next) return;
+    const prev = plainPasswordMemo.get(el);
+    const best = pickBetterPlain(prev, next);
+    plainPasswordMemo.set(el, best);
+    const ctxKey = getPasswordContextKey(el);
+    plainPasswordByContext.set(ctxKey, pickBetterPlain(plainPasswordByContext.get(ctxKey), best));
+    pruneContextMap();
+  }
+
+  function snapshotAllPlainPasswords() {
+    try {
+      for (const el of findAllPasswordInputs()) rememberPlainPassword(el);
+    } catch (_) {}
   }
 
   function resolvePlainPassword(passwordEl) {
@@ -58,6 +124,22 @@
     }
     const domVal = String(passwordEl.value ?? "");
     const remembered = plainPasswordMemo.get(passwordEl);
+    const ctxPlain = plainPasswordByContext.get(getPasswordContextKey(passwordEl));
+
+    /** @type {string[]} */
+    const candidates = [];
+    if (remembered) candidates.push(remembered);
+    if (ctxPlain && ctxPlain !== remembered) candidates.push(ctxPlain);
+    for (const v of plainPasswordByContext.values()) {
+      if (v && !candidates.includes(v)) candidates.push(v);
+    }
+
+    for (const plain of candidates) {
+      if (!plain) continue;
+      if (domVal === plain) return domVal;
+      if (looksLikeSiteCiphertext(domVal, plain)) return plain;
+    }
+
     if (remembered === undefined || remembered === "") return domVal;
     if (domVal === remembered) return domVal;
     const dr = domVal.length;
@@ -77,38 +159,25 @@
     return domVal;
   }
 
-  document.addEventListener(
-    "input",
-    (ev) => {
+  function bindPasswordMemoryEvents() {
+    const onPasswordEvent = (ev) => {
       const t = ev.target;
       if (t instanceof HTMLInputElement && t.type === "password") rememberPlainPassword(t);
-    },
-    true
-  );
+    };
+    document.addEventListener("input", onPasswordEvent, true);
+    document.addEventListener("change", onPasswordEvent, true);
+    document.addEventListener("keyup", onPasswordEvent, true);
+    document.addEventListener("beforeinput", onPasswordEvent, true);
+    document.addEventListener("focusout", onPasswordEvent, true);
+    document.addEventListener("pointerdown", snapshotAllPlainPasswords, true);
+    document.addEventListener("mousedown", snapshotAllPlainPasswords, true);
+  }
 
-  document.addEventListener(
-    "change",
-    (ev) => {
-      const t = ev.target;
-      if (t instanceof HTMLInputElement && t.type === "password") rememberPlainPassword(t);
-    },
-    true
-  );
-
-  /** 在站点「登录」点击逻辑改写密码框之前尽量快照明文（capture 较早阶段） */
-  document.addEventListener(
-    "pointerdown",
-    () => {
-      try {
-        for (const el of findAllPasswordInputs()) {
-          rememberPlainPassword(el);
-        }
-      } catch (_) {}
-    },
-    true
-  );
+  bindPasswordMemoryEvents();
 
   globalThis.__keynestResolvePlainPassword = resolvePlainPassword;
+  globalThis.__keynestSnapshotPlainPasswords = snapshotAllPlainPasswords;
+  globalThis.__keynestLooksLikeSiteCiphertext = looksLikeSiteCiphertext;
 
   function pickBestPasswordInput() {
     const list = findAllPasswordInputs();

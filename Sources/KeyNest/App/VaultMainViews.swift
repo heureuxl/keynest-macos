@@ -28,6 +28,8 @@ struct MainVaultView: View {
     @State private var searchText = ""
     @State private var listFilter: VaultListFilter = .all
     @State private var layoutMode: VaultListLayoutMode = .flat
+    @State private var siteLimitPrompt: SiteLimitSavePrompt?
+    @State private var pendingAddAfterLimit: PasswordItem?
     private var searchTokens: [String] {
         searchText.split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.isEmpty }
     }
@@ -58,7 +60,15 @@ struct MainVaultView: View {
             let map = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
             return order.compactMap { map[$0] }
         }
+        if layoutMode == .flat && listFilter == .all && searchTokens.isEmpty {
+            let ids = Set(list.map(\.id))
+            return vault.items.filter { ids.contains($0.id) }
+        }
         return list.sorted(by: sortPair)
+    }
+
+    private var canReorderList: Bool {
+        layoutMode == .flat && listFilter == .all && searchTokens.isEmpty
     }
 
     private func identityKey(for item: PasswordItem) -> String {
@@ -134,6 +144,24 @@ struct MainVaultView: View {
             } message: {
                 Text(deleteError ?? "")
             }
+            .confirmationDialog(
+                "站点账号已达上限",
+                isPresented: Binding(
+                    get: { siteLimitPrompt != nil },
+                    set: { if !$0 { siteLimitPrompt = nil; pendingAddAfterLimit = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("继续保存", role: .destructive) {
+                    confirmSiteLimitAdd()
+                }
+                Button("取消", role: .cancel) {
+                    siteLimitPrompt = nil
+                    pendingAddAfterLimit = nil
+                }
+            } message: {
+                Text(siteLimitPrompt?.message ?? "")
+            }
             .frame(minWidth: 280)
         } detail: {
             Group {
@@ -156,7 +184,11 @@ struct MainVaultView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .sheet(isPresented: $showingAdd) {
-            ItemEditorSheet(mode: .add)
+            ItemEditorSheet(mode: .add, onSiteLimitRequired: { prompt, item in
+                siteLimitPrompt = prompt
+                pendingAddAfterLimit = item
+                showingAdd = false
+            })
         }
         .sheet(item: $editingItem) { item in
             ItemEditorSheet(mode: .edit(item))
@@ -254,6 +286,7 @@ struct MainVaultView: View {
                         }
                     }
             }
+            .onMove(perform: canReorderList ? moveDisplayItems : nil)
             .onDelete(perform: deleteItemsAtOffsets)
         }
         .listStyle(.sidebar)
@@ -270,6 +303,29 @@ struct MainVaultView: View {
             copyPasswordForSelection()
             return .handled
         }
+    }
+
+    private func moveDisplayItems(from source: IndexSet, to destination: Int) {
+        var ordered = displayItems
+        ordered.move(fromOffsets: source, toOffset: destination)
+        do {
+            try vault.reorderItems(visibleIdsInOrder: ordered.map(\.id))
+        } catch {
+            deleteError = error.localizedDescription
+        }
+    }
+
+    private func confirmSiteLimitAdd() {
+        guard let item = pendingAddAfterLimit else { return }
+        do {
+            if try vault.add(item, allowEvictOldest: true) {
+                selection = item.id
+            }
+        } catch {
+            deleteError = error.localizedDescription
+        }
+        siteLimitPrompt = nil
+        pendingAddAfterLimit = nil
     }
 
     private var hostGroupedList: some View {
