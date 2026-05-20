@@ -47,59 +47,24 @@ zip_folder "$EXT_EDGE" "$DIST/KeyNest-Edge.zip" "KeyNest"
 echo "==> KeyNest-Firefox.zip"
 zip_folder "$EXT_FF" "$DIST/KeyNest-Firefox.zip" "KeyNest"
 
-cat >"$DIST/Chrome扩展安装说明.txt" <<'TXT'
-【方式一 · 单个安装包（推荐）】KeyNest-Chrome.crx
-1. 用 Chrome 打开 chrome://extensions
-2. 打开右上角「开发者模式」
-3. 将 KeyNest-Chrome.crx 拖入该页面（或双击 crx 并按提示允许）
-
-【方式二 · 解压包】KeyNest-Chrome.zip
-1. 解压 zip，得到名为 KeyNest 的一个文件夹（请勿只拷贝零散文件）
-2. chrome://extensions 打开「开发者模式」→「加载已解压的扩展程序」→ 选中解压出的 KeyNest 文件夹
-
-安装后请保持本机 KeyNest 桌面端已解锁并开启「桥接」。
-TXT
-
-cat >"$DIST/Edge扩展安装说明.txt" <<'TXT'
-Microsoft Edge（Chromium）可使用 KeyNest-Edge.zip，或与 Chrome 相同的 KeyNest-Chrome.zip（扩展格式一致）。
-
-【加载已解压】
-1. 打开 edge://extensions
-2. 开启左下角「开发人员模式」
-3. 点击「加载解压缩的扩展」→ 选择解压后的 KeyNest 文件夹（勿只选零散文件）
-
-安装后请保持本机 KeyNest 桌面端已解锁并开启「桥接」。
-TXT
-
-cat >"$DIST/Firefox扩展安装说明.txt" <<'TXT'
-【临时加载 · 调试】
-1. 解压 KeyNest-Firefox.zip，得到 KeyNest 文件夹
-2. 打开 about:debugging#/runtime/this-firefox
-3. 「临时载入扩展」→ 选择 KeyNest 文件夹内的 manifest.json（或选择文件夹，依 Firefox 版本界面为准）
-
-【正式发布】需通过 Firefox Add-ons（AMO）签名；本地临时载入每次重启浏览器可能需重新加载。
-
-安装后请保持本机 KeyNest 桌面端已解锁并开启「桥接」。
-TXT
-
-cat >"$DIST/Safari扩展安装说明.txt" <<'TXT'
-Safari 扩展需使用 Xcode 将 Web Extension 包装为 App Extension（macOS 仅支持此分发方式）。
-
-【从本仓库生成 Xcode 工程】（需在 macOS 上安装 Xcode / Command Line Tools）
-在仓库根目录执行：
-  bash scripts/convert-safari-extension.sh
-
-或用命令行手动：
-  xcrun safari-web-extension-converter browser/safari-extension \\
-    --swift --macos-only --copy-resources \\
-    --project-location browser/safari-extension-build
-
-随后在 Xcode 中打开生成的工程，选择 KeyNest 扩展 Scheme 编译运行；首次需在 Safari → 开发 → 允许无效扩展（或使用开发者证书签名后在 App Store Connect / 公证流程分发）。
-
-详见 Apple 文档：Safari Web Extensions。
-
-脚本会先同步 browser/chrome-extension 中的 .js / .html 到 browser/safari-extension。
-TXT
+# UTF-8 中文安装说明（带 BOM），源码见 scripts/extension-install-notes/
+rm -f "$DIST"/*.txt
+NOTES_DIR="$ROOT/scripts/extension-install-notes"
+MANIFEST="$NOTES_DIR/notes-manifest.json"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "错误: 需要 python3 以根据 notes-manifest.json 生成安装说明。" >&2
+  exit 1
+fi
+python3 - "$NOTES_DIR" "$MANIFEST" "$DIST" <<'PY'
+import json, pathlib, sys
+notes_dir, manifest_path, dist = map(pathlib.Path, sys.argv[1:4])
+entries = json.loads(manifest_path.read_text(encoding="utf-8"))["files"]
+bom = "\ufeff".encode("utf-8")
+for e in entries:
+    src = notes_dir / e["src"]
+    dest = dist / e["dest"]
+    dest.write_bytes(bom + src.read_text(encoding="utf-8").encode("utf-8"))
+PY
 
 if [[ -n "$CHROME" ]]; then
   echo "==> 使用 Chrome 打包 KeyNest-Chrome.crx（来源目录：chrome-extension）"

@@ -42,14 +42,30 @@ async function confirmSiteLimitIfNeeded(limit) {
 const WRAP_ID = "__keynest_fill_wrap__";
 const HINT_ID = "__keynest_hint__";
 
+/** 跨 iframe 共享状态（manifest all_frames 时各帧 globalThis 独立） */
+function knTopWindow() {
+  try {
+    return window.top;
+  } catch (_) {
+    return window;
+  }
+}
+
+function knCoord() {
+  const w = knTopWindow();
+  if (!w.__knCoord) w.__knCoord = {};
+  return w.__knCoord;
+}
+
 /** @param {{ title?: string, url: string, username: string, password: string }} payload */
 async function runSaveOffer(payload) {
-  if (globalThis.__knSaveOfferRunning) return;
-  globalThis.__knSaveOfferRunning = true;
+  const coord = knCoord();
+  if (coord.saveOfferRunning) return;
+  coord.saveOfferRunning = true;
   try {
     await runSaveOfferInner(payload);
   } finally {
-    globalThis.__knSaveOfferRunning = false;
+    coord.saveOfferRunning = false;
   }
 }
 
@@ -58,9 +74,10 @@ async function runSaveOfferInner(payload) {
   const password = String(payload.password || "").trim();
   if (!password) return;
 
+  const coord = knCoord();
   const now = Date.now();
-  if (now - (globalThis.__knLastSaveOfferAt || 0) < 900) return;
-  globalThis.__knLastSaveOfferAt = now;
+  if (now - (coord.lastSaveOfferAt || 0) < 1200) return;
+  coord.lastSaveOfferAt = now;
 
   const uname = String(payload.username || "").trim();
   const dedupe =
@@ -291,10 +308,11 @@ function cancelScheduledSnapshotSave() {
 }
 
 function scheduleSnapshotSave() {
-  if (Date.now() - (globalThis.__knSaveOfferHandledAt || 0) < 2500) return;
+  const coord = knCoord();
+  if (Date.now() - (coord.saveOfferHandledAt || 0) < 2500) return;
   cancelScheduledSnapshotSave();
   globalThis.__keynestSaveDebounce = setTimeout(() => {
-    if (Date.now() - (globalThis.__knSaveOfferHandledAt || 0) < 2500) return;
+    if (Date.now() - (knCoord().saveOfferHandledAt || 0) < 2500) return;
     const snap = pickSaveSnapshot();
     if (!snap) return;
     delete globalThis.__keynestPendingSaveSnapshot;
@@ -352,6 +370,8 @@ document.addEventListener(
     if (t instanceof HTMLTextAreaElement) return;
     if (t instanceof HTMLInputElement && t.type === "password") {
       capturePendingSaveSnapshot();
+      const form = t.closest?.("form");
+      if (form instanceof HTMLFormElement && tpLooksLikeClassicPasswordLogin(form)) return;
       scheduleSnapshotSave();
     }
   },
@@ -456,7 +476,7 @@ document.addEventListener(
     };
 
     cancelScheduledSnapshotSave();
-    globalThis.__knSaveOfferHandledAt = Date.now();
+    knCoord().saveOfferHandledAt = Date.now();
     await runSaveOffer(payload);
 
     const sub = ev.submitter;

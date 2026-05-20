@@ -1,0 +1,8 @@
+{
+  "files": [
+    { "src": "chrome-install-zh.txt", "dest": "Chrome扩展安装说明.txt" },
+    { "src": "edge-install-zh.txt", "dest": "Edge扩展安装说明.txt" },
+    { "src": "firefox-install-zh.txt", "dest": "Firefox扩展安装说明.txt" },
+    { "src": "safari-install-zh.txt", "dest": "Safari扩展安装说明.txt" }
+  ]
+}

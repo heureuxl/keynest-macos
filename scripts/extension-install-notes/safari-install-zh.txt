@@ -1,0 +1,26 @@
+KeyNest — Safari 扩展安装说明（macOS）
+========================================
+
+Safari 扩展需通过 Xcode 将 Web Extension 包装为 App Extension（macOS 仅支持此分发方式）。
+
+一、从本仓库生成 Xcode 工程
+在仓库根目录执行：
+  bash scripts/convert-safari-extension.sh
+
+或手动：
+  xcrun safari-web-extension-converter browser/safari-extension \
+    --swift --macos-only --copy-resources \
+    --project-location browser/safari-extension-build
+
+二、编译与启用
+1. 用 Xcode 打开生成的工程，选择 KeyNest 扩展 Scheme 编译运行。
+2. 在 Safari → 设置 → 扩展 中启用 KeyNest。
+3. 首次开发阶段可能需在 Safari → 开发 菜单中允许无效扩展，或使用开发者证书签名后分发。
+
+三、资源同步
+构建前脚本会将 browser/chrome-extension 中的 .js / .html 同步到 browser/safari-extension。
+
+四、桌面端与桥接
+打开 KeyNest macOS 应用并解锁，勾选「允许浏览器扩展连接本机端口 17373」。
+
+详见 Apple 文档：Safari Web Extensions。

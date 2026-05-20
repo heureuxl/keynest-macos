@@ -73,7 +73,7 @@ bash scripts/build-chrome-extension.sh
 | `KeyNest-Chrome.zip` / `KeyNest-Chrome.crx` | Google Chrome |
 | `KeyNest-Edge.zip` | Microsoft Edge（Chromium，亦可共用 Chrome 包） |
 | `KeyNest-Firefox.zip` | Mozilla Firefox（MV3，`browser_specific_settings.gecko` 已配置） |
-| `*_扩展安装说明.txt` | 各浏览器加载步骤 |
+| `Chrome扩展安装说明.txt` 等 | 各浏览器中文安装说明（UTF-8 带 BOM；源码见 `scripts/extension-install-notes/`） |
 
 **Safari**：Web Extension 需由 Apple 提供的工具转为 Xcode 工程后再编译、在 Safari 中启用：
 
