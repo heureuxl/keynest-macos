@@ -255,34 +255,17 @@ final class LocalTCPBridge: ObservableObject {
             password: password,
             url: urlStr
         )
-        var allowEvict = payload.confirmEvict
-        if let prompt = vault.siteLimitSavePrompt(for: newItem, pageURL: urlStr), !allowEvict {
-            if !confirmSiteLimitOnMac(prompt: prompt) {
-                sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":false,"cancelled":true}"#.utf8), json: true)
-                return
-            }
-            allowEvict = true
-        }
+        // 浏览器扩展已在页面内完成保存/站点上限确认；桥接路径始终允许驱逐最旧条目，避免桌面 NSAlert 被忽略导致静默失败
         do {
-            let saved = try vault.add(newItem, pageURL: urlStr, allowEvictOldest: allowEvict)
+            let saved = try vault.add(newItem, pageURL: urlStr, allowEvictOldest: true)
             if !saved {
-                sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":false,"cancelled":true}"#.utf8), json: true)
+                sendHTTP(connection: connection, status: 500, body: Data(#"{"error":"save rejected at site limit"}"#.utf8), json: true)
                 return
             }
             sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":true}"#.utf8), json: true)
         } catch {
             sendHTTP(connection: connection, status: 500, body: Data(#"{"error":"save failed"}"#.utf8), json: true)
         }
-    }
-
-    private func confirmSiteLimitOnMac(prompt: SiteLimitSavePrompt) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "KeyNest"
-        alert.informativeText = prompt.message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "继续保存")
-        alert.addButton(withTitle: "取消")
-        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func respondSiteLimitCheck(connection: NWConnection, components: URLComponents) {

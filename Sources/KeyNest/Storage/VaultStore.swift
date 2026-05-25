@@ -165,7 +165,7 @@ final class VaultStore: ObservableObject {
         }
         guard let oldest = items.enumerated()
             .filter({ siteIdentityKey(for: $0.element) == siteKey })
-            .min(by: { $0.offset < $1.offset })?
+            .min(by: { $0.offset < $1.offset })
         else { return nil }
 
         return SiteLimitSavePrompt(

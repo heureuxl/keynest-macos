@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KeyNest 助手",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "与本机 KeyNest 应用通信，在网页上填入账号密码（需桌面端已解锁并开启桥接）。",
   "permissions": ["activeTab", "scripting", "tabs"],
   "host_permissions": ["http://127.0.0.1:17373/*"],

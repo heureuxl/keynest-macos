@@ -693,6 +693,8 @@ struct ItemEditorSheet: View {
                     if let prompt = vault.siteLimitSavePrompt(for: item) {
                         siteLimitPrompt = prompt
                         pendingAddItem = item
+                    } else {
+                        errorText = "保存失败：未能写入保管库（请检查站点账号上限设置）。"
                     }
                     return
                 }

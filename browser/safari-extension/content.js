@@ -69,6 +69,39 @@ async function runSaveOffer(payload) {
   }
 }
 
+/** 保管库密码与当前输入是否不同（排除站点把输入框改成密文导致的假不一致） */
+function vaultPasswordDiffers(stored, typed) {
+  if (stored === typed) return false;
+  const looksCipher = globalThis.__keynestLooksLikeSiteCiphertext;
+  if (typeof looksCipher === "function") {
+    if (looksCipher(typed, stored) || looksCipher(stored, typed)) return true;
+  }
+  return stored !== typed;
+}
+
+async function postSaveToBridge(body, dedupeKey, now) {
+  try {
+    const res = await fetch(SAVE_BRIDGE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      keepalive: true,
+    });
+    if (!res.ok) return false;
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (_) {}
+    if (data.cancelled === true || data.ok === false) return false;
+    try {
+      sessionStorage.setItem(dedupeKey, String(now));
+    } catch (_) {}
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 /** @param {{ title?: string, url: string, username: string, password: string }} payload */
 async function runSaveOfferInner(payload) {
   const password = String(payload.password || "").trim();
@@ -108,9 +141,17 @@ async function runSaveOfferInner(payload) {
         ? list.find((x) => String(x.username || "").trim().toLowerCase() === unameLower)
         : null;
       if (match) {
-        if (match.password === password) {
+        if (!vaultPasswordDiffers(match.password, password)) {
           shouldPost = false;
         } else {
+          const looksCipher = globalThis.__keynestLooksLikeSiteCiphertext;
+          const badVault =
+            typeof looksCipher === "function" && looksCipher(match.password, password);
+          if (badVault) {
+            shouldPost = confirm(
+              "KeyNest 中该账号保存的密码可能不是明文（曾被站点加密）。\n\n是否用当前输入的密码更新保管库？"
+            );
+          } else {
           const mismatchAskKey =
             "kn_pwMismatchAsked_" +
             location.hostname +
@@ -136,6 +177,7 @@ async function runSaveOfferInner(payload) {
               sessionStorage.setItem(mismatchAskKey, String(Date.now()));
             } catch (_) {}
           }
+          }
         }
       } else {
         const msg = uname
@@ -157,21 +199,20 @@ async function runSaveOfferInner(payload) {
     const limit = await fetchSiteLimitCheck(pageUrl, uname);
     if (!(await confirmSiteLimitIfNeeded(limit || {}))) return;
 
-    try {
-      sessionStorage.setItem(dedupe, String(now));
-    } catch (_) {}
-    fetch(SAVE_BRIDGE, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const posted = await postSaveToBridge(
+      {
         title: payload.title || document.title || "",
         url: pageUrl,
         username: uname,
         password,
         confirmEvict: !!(limit && limit.needsConfirm),
-      }),
-      keepalive: true,
-    }).catch(() => {});
+      },
+      dedupe,
+      now
+    );
+    if (!posted) {
+      showKeynestHint("KeyNest：未能写入保管库，请确认桌面端已解锁并开启桥接。");
+    }
   }
 }
 
