@@ -23,13 +23,25 @@ async function fetchSiteLimitCheck(url, username) {
 
 function formatSiteLimitConfirmMessage(limit) {
   const site = limit.siteLabel || location.hostname;
-  const max = limit.maxAccounts ?? 3;
-  const count = limit.currentCount ?? max;
+  const max =
+    typeof limit.maxAccounts === "number" && limit.maxAccounts > 0
+      ? limit.maxAccounts
+      : null;
+  const count =
+    typeof limit.currentCount === "number" && limit.currentCount >= 0
+      ? limit.currentCount
+      : null;
+  if (max == null) {
+    return (
+      `网站「${site}」该站点账号数已达上限。\n\n` +
+      `继续保存将移除最早条目。是否继续保存？`
+    );
+  }
   const incoming = String(limit.incomingUsername || "").trim() || "（无用户名）";
   const evictTitle = limit.evictTitle || "未命名";
   const evictUser = String(limit.evictUsername || "").trim() || "（无用户名）";
   return (
-    `网站「${site}」已保存 ${count} 个不同账号（上限 ${max} 个）。\n\n` +
+    `网站「${site}」已保存 ${count ?? "?"} 个不同账号（上限 ${max} 个）。\n\n` +
     `继续保存「${incoming}」将移除最早条目：\n${evictTitle}（${evictUser}）\n\n是否继续保存？`
   );
 }

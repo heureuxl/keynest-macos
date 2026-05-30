@@ -282,21 +282,10 @@ final class LocalTCPBridge: ObservableObject {
             return
         }
         let username = components.queryItems?.first(where: { $0.name == "username" })?.value ?? ""
-        let probe = PasswordItem(title: "", username: username, password: "x", url: pageURL)
-        if let prompt = vault.siteLimitSavePrompt(for: probe, pageURL: pageURL) {
-            let check = BridgeSiteLimitCheck(
-                needsConfirm: true,
-                maxAccounts: prompt.maxAccounts,
-                currentCount: prompt.currentCount,
-                siteLabel: prompt.siteLabel,
-                evictTitle: prompt.evictTitle,
-                evictUsername: prompt.evictUsername,
-                incomingUsername: prompt.incomingUsername
-            )
-            if let enc = try? JSONEncoder().encode(check) {
-                sendHTTP(connection: connection, status: 200, body: enc, json: true)
-                return
-            }
+        let check = vault.bridgeSiteLimitCheck(pageURL: pageURL, username: username)
+        if let enc = try? JSONEncoder().encode(check) {
+            sendHTTP(connection: connection, status: 200, body: enc, json: true)
+            return
         }
         sendHTTP(connection: connection, status: 200, body: Data(#"{"needsConfirm":false}"#.utf8), json: true)
     }

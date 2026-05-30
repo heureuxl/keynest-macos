@@ -160,7 +160,8 @@ final class VaultStore: ObservableObject {
             return nil
         }
         let maxN = settings.maxAccountsPerSiteHost
-        if group.count < maxN {
+        let distinctCount = distinctUsernameCount(in: group)
+        if distinctCount < maxN {
             return nil
         }
         guard let oldest = items.enumerated()
@@ -171,10 +172,45 @@ final class VaultStore: ObservableObject {
         return SiteLimitSavePrompt(
             siteLabel: SiteIdentityService.formatGroupTitle(siteKey),
             maxAccounts: maxN,
-            currentCount: group.count,
+            currentCount: distinctCount,
             incomingUsername: copy.username,
             evictTitle: oldest.element.title.isEmpty ? "未命名" : oldest.element.title,
             evictUsername: oldest.element.username
+        )
+    }
+
+    /// 扩展查询站点上限；始终返回当前设置的上限与已存不同用户名数量。
+    func bridgeSiteLimitCheck(pageURL: String, username: String) -> BridgeSiteLimitCheck {
+        let maxN = settings.maxAccountsPerSiteHost
+        var probe = PasswordItem(title: "", username: username, password: "x", url: pageURL)
+        applyAutoSiteEndpoint(&probe, pageURL: pageURL)
+        let siteKey = siteIdentityKey(for: probe)
+        let distinctCount: Int
+        if let siteKey {
+            let group = items.filter { siteIdentityKey(for: $0) == siteKey }
+            distinctCount = distinctUsernameCount(in: group)
+        } else {
+            distinctCount = 0
+        }
+        if let prompt = siteLimitSavePrompt(for: probe, pageURL: pageURL) {
+            return BridgeSiteLimitCheck(
+                needsConfirm: true,
+                maxAccounts: prompt.maxAccounts,
+                currentCount: prompt.currentCount,
+                siteLabel: prompt.siteLabel,
+                evictTitle: prompt.evictTitle,
+                evictUsername: prompt.evictUsername,
+                incomingUsername: prompt.incomingUsername
+            )
+        }
+        return BridgeSiteLimitCheck(
+            needsConfirm: false,
+            maxAccounts: maxN,
+            currentCount: distinctCount,
+            siteLabel: siteKey.map { SiteIdentityService.formatGroupTitle($0) } ?? "",
+            evictTitle: "",
+            evictUsername: "",
+            incomingUsername: username
         )
     }
 
@@ -214,6 +250,11 @@ final class VaultStore: ObservableObject {
 
     private func normalizedUsernameKey(_ username: String) -> String {
         username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// 同一站点环境下已保存的不同用户名个数（与 enforceMaxAccountsPerSiteURL 一致）。
+    private func distinctUsernameCount(in group: [PasswordItem]) -> Int {
+        Set(group.map { normalizedUsernameKey($0.username) }).count
     }
 
     private func siteIdentityKey(for item: PasswordItem) -> String? {
@@ -263,7 +304,7 @@ final class VaultStore: ObservableObject {
         }
 
         let maxN = settings.maxAccountsPerSiteHost
-        if group.count >= maxN {
+        if distinctUsernameCount(in: group) >= maxN {
             if !allowEvictOldest {
                 return false
             }
