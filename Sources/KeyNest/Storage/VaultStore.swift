@@ -304,7 +304,7 @@ final class VaultStore: ObservableObject {
         }
 
         let maxN = settings.maxAccountsPerSiteHost
-        if distinctUsernameCount(in: group) >= maxN {
+        if distinctUsernameCount(in: group.map(\.element)) >= maxN {
             if !allowEvictOldest {
                 return false
             }
