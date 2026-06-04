@@ -274,11 +274,17 @@ final class VaultStore: ObservableObject {
         }
     }
 
+    /// `@Published` 对数组下标赋值不会触发界面刷新，桥接保存后需整表替换。
+    private func publishItemsMutation() {
+        items = items
+    }
+
     @discardableResult
     private func mergeIncomingBySiteHost(_ item: PasswordItem, allowEvictOldest: Bool) throws -> Bool {
         guard let siteKey = siteIdentityKey(for: item) else {
             items.append(item)
             try persistVaultV2()
+            publishItemsMutation()
             return true
         }
         let userKey = normalizedUsernameKey(item.username)
@@ -300,6 +306,7 @@ final class VaultStore: ObservableObject {
             let dupIds = group.filter { $0.offset != hit.offset && normalizedUsernameKey($0.element.username) == userKey }.map(\.element.id)
             items.removeAll { dupIds.contains($0.id) }
             try persistVaultV2()
+            publishItemsMutation()
             return true
         }
 
@@ -311,12 +318,14 @@ final class VaultStore: ObservableObject {
             guard let oldest = group.min(by: { $0.offset < $1.offset }) else {
                 items.append(item)
                 try persistVaultV2()
+                publishItemsMutation()
                 return true
             }
             items.removeAll { $0.id == oldest.element.id }
         }
         items.append(item)
         try persistVaultV2()
+        publishItemsMutation()
         return true
     }
 

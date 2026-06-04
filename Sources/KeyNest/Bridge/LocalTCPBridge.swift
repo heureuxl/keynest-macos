@@ -102,8 +102,10 @@ final class LocalTCPBridge: ObservableObject {
             if firstLine.hasPrefix("POST ") {
                 let bodySoFar = Data(afterHeaders)
                 if contentLength == 0 {
+                    // Chrome 等客户端偶发省略 Content-Length，正文已在首包
+                    let body = bodySoFar.isEmpty ? Data() : bodySoFar
                     Task { @MainActor in
-                        self.dispatchHTTP(connection: connection, headers: headerText, body: Data())
+                        self.dispatchHTTP(connection: connection, headers: headerText, body: body)
                     }
                     return
                 }

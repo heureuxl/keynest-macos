@@ -91,26 +91,34 @@ function vaultPasswordDiffers(stored, typed) {
   return stored !== typed;
 }
 
+/** @returns {Promise<{ ok: boolean, hint?: string }>} */
 async function postSaveToBridge(body, dedupeKey, now) {
   try {
     const res = await fetch(SAVE_BRIDGE, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      keepalive: true,
     });
-    if (!res.ok) return false;
     let data = {};
     try {
       data = await res.json();
     } catch (_) {}
-    if (data.cancelled === true || data.ok === false) return false;
+    if (!res.ok) {
+      const err = data.error || `HTTP ${res.status}`;
+      return { ok: false, hint: `KeyNest：保存失败（${err}）。请确认桌面端已解锁并开启桥接。` };
+    }
+    if (data.cancelled === true || data.ok === false) {
+      return { ok: false, hint: "KeyNest：保存已取消或遭拒绝（站点账号上限等）。" };
+    }
     try {
       sessionStorage.setItem(dedupeKey, String(now));
     } catch (_) {}
-    return true;
+    if (data.unchanged === true) {
+      return { ok: true, hint: "KeyNest：该账号密码与保管库一致，无需更新。" };
+    }
+    return { ok: true };
   } catch (_) {
-    return false;
+    return { ok: false, hint: "KeyNest：无法连接本机应用，请确认 KeyNest 已运行、已解锁并开启桥接。" };
   }
 }
 
@@ -185,9 +193,11 @@ async function runSaveOfferInner(payload) {
             shouldPost = confirm(
               "KeyNest 已保存该账号，但密码与当前输入不一致。\n\n是否用新密码更新保管库？"
             );
-            try {
-              sessionStorage.setItem(mismatchAskKey, String(Date.now()));
-            } catch (_) {}
+            if (shouldPost) {
+              try {
+                sessionStorage.setItem(mismatchAskKey, String(Date.now()));
+              } catch (_) {}
+            }
           }
           }
         }
@@ -211,7 +221,7 @@ async function runSaveOfferInner(payload) {
     const limit = await fetchSiteLimitCheck(pageUrl, uname);
     if (!(await confirmSiteLimitIfNeeded(limit || {}))) return;
 
-    const posted = await postSaveToBridge(
+    const result = await postSaveToBridge(
       {
         title: payload.title || document.title || "",
         url: pageUrl,
@@ -222,8 +232,10 @@ async function runSaveOfferInner(payload) {
       dedupe,
       now
     );
-    if (!posted) {
-      showKeynestHint("KeyNest：未能写入保管库，请确认桌面端已解锁并开启桥接。");
+    if (!result.ok && result.hint) {
+      showKeynestHint(result.hint);
+    } else if (result.ok && result.hint) {
+      showKeynestHint(result.hint);
     }
   }
 }
@@ -364,7 +376,7 @@ function scheduleSnapshotSave() {
   const coord = knCoord();
   if (Date.now() - (coord.saveOfferHandledAt || 0) < 2500) return;
   cancelScheduledSnapshotSave();
-  globalThis.__keynestSaveDebounce = setTimeout(() => {
+  globalThis.__keynestSaveDebounce = setTimeout(async () => {
     if (Date.now() - (knCoord().saveOfferHandledAt || 0) < 2500) return;
     const snap = pickSaveSnapshot();
     if (!snap) return;
@@ -374,7 +386,7 @@ function scheduleSnapshotSave() {
         "KeyNest：未检测到账号输入框内容。若网站用手机号登录，请先填写手机号再点登录；也可之后在桌面端补充用户名。"
       );
     }
-    runSaveOffer({
+    await runSaveOffer({
       title: document.title || "",
       url: location.href,
       username: snap.username || "",
