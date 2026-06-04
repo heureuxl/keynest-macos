@@ -91,13 +91,27 @@
     return false;
   }
 
+  /** 站点常在点击登录瞬间把 value 改成 1 个掩码/占位字符，不得用更短值覆盖已记住的长明文 */
+  function isLikelyTransientMask(domVal, plainHint) {
+    if (!domVal || !plainHint || domVal === plainHint) return false;
+    if (plainHint.length < 2) return false;
+    if (domVal.length !== 1) return false;
+    if (looksLikeSiteCiphertext(domVal, plainHint)) return true;
+    return true;
+  }
+
   function pickBetterPlain(prev, next) {
     if (!next) return prev ?? "";
     if (!prev) return next;
     if (next === prev) return prev;
     if (looksLikeSiteCiphertext(next, prev)) return prev;
     if (looksLikeSiteCiphertext(prev, next)) return next;
-    return next.length <= prev.length ? next : prev;
+    if (isLikelyTransientMask(next, prev)) return prev;
+    if (isLikelyTransientMask(prev, next)) return next;
+    // 正常输入过程变长；同长度保留较新值
+    if (next.length > prev.length) return next;
+    if (next.length < prev.length) return prev;
+    return next;
   }
 
   function rememberPlainPassword(el) {
@@ -130,21 +144,26 @@
     const candidates = [];
     if (remembered) candidates.push(remembered);
     if (ctxPlain && ctxPlain !== remembered) candidates.push(ctxPlain);
-    for (const v of plainPasswordByContext.values()) {
-      if (v && !candidates.includes(v)) candidates.push(v);
-    }
 
     for (const plain of candidates) {
       if (!plain) continue;
       if (domVal === plain) return domVal;
       if (looksLikeSiteCiphertext(domVal, plain)) return plain;
+      if (isLikelyTransientMask(domVal, plain)) return plain;
     }
+
+    const bestLocal = pickBetterPlain(
+      pickBetterPlain(remembered ?? "", ctxPlain ?? ""),
+      domVal
+    );
+    if (bestLocal) return bestLocal;
 
     if (remembered === undefined || remembered === "") return domVal;
     if (domVal === remembered) return domVal;
     const dr = domVal.length;
     const rr = remembered.length;
     if (rr === 0) return domVal;
+    if (isLikelyTransientMask(domVal, remembered)) return remembered;
     if (dr >= rr * 2) return remembered;
     if (dr >= rr + 24 && dr >= 32) return remembered;
     const domCompact = domVal.replace(/\s/g, "");
@@ -156,6 +175,7 @@
     ) {
       return remembered;
     }
+    if (dr < rr) return remembered;
     return domVal;
   }
 

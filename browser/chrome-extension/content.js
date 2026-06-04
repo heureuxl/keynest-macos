@@ -364,7 +364,14 @@ function pickSaveSnapshot() {
   if (typeof snapFn !== "function") return null;
   const snap = snapFn();
   if (!snap || !String(snap.password || "").trim()) return null;
-  return { username: snap.username || "", password: snap.password };
+  const pwd = String(snap.password);
+  if (pwd.length === 1 && pending) {
+    const pendingPwd = String(pending.password || "");
+    if (pendingPwd.length > 1) {
+      return { username: snap.username || pending.username || "", password: pendingPwd };
+    }
+  }
+  return { username: snap.username || "", password: pwd };
 }
 
 function cancelScheduledSnapshotSave() {
