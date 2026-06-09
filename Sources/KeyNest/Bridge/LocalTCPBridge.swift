@@ -246,6 +246,10 @@ final class LocalTCPBridge: ObservableObject {
             sendHTTP(connection: connection, status: 400, body: Data(#"{"error":"empty password"}"#.utf8), json: true)
             return
         }
+        guard password.count >= 2 else {
+            sendHTTP(connection: connection, status: 400, body: Data(#"{"error":"password too short"}"#.utf8), json: true)
+            return
+        }
         let displayTitle = title.isEmpty ? (URL(string: urlStr)?.host ?? "未命名") : title
         if vault.shouldSkipBridgeSave(pageURL: urlStr, username: username, password: password) {
             sendHTTP(connection: connection, status: 200, body: Data(#"{"ok":true,"unchanged":true}"#.utf8), json: true)

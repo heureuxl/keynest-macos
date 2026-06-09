@@ -382,7 +382,10 @@ final class VaultStore: ObservableObject {
         let uk = normalizedUsernameKey(username)
         let hits = matches(forPageURL: pageURL).filter { normalizedUsernameKey($0.username) == uk }
         guard let hit = hits.first else { return false }
-        return hit.password == password
+        if hit.password == password { return true }
+        // 曾误存极短密码时，允许扩展用更长明文覆盖
+        if hit.password.count <= 2, password.count > hit.password.count { return false }
+        return false
     }
 
     /// 按当前页与条目网站匹配；开启 IP 区分时还要求 hosts 解析环境一致。

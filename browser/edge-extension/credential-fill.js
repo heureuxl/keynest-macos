@@ -1,13 +1,10 @@
 /**
  * 与 React / Vue 等受控输入兼容：不能仅用 el.value = x；穿透 Shadow DOM；填入后校验 DOM。
- * 返回 Promise<{ ok, reason? }>，便于扩展 UI 区分「未生效」。
+ * 密码明文：从 DOM、输入事件累积、元素/表单上下文合并，避免掩码单字符与提交后密文。
  */
 (function () {
   "use strict";
 
-  /**
-   * @param {HTMLElement} el
-   */
   function isVisible(el) {
     if (!el || !(el instanceof HTMLElement)) return false;
     const st = globalThis.getComputedStyle(el);
@@ -16,11 +13,6 @@
     return r.width > 0 && r.height > 0;
   }
 
-  /**
-   * @param {ParentNode} container
-   * @param {string} selector
-   * @returns {HTMLElement[]}
-   */
   function querySelectorAllDeep(container, selector) {
     const out = /** @type {HTMLElement[]} */ ([]);
     function walk(subroot) {
@@ -38,19 +30,24 @@
     return out;
   }
 
-  function findAllPasswordInputs() {
-    return querySelectorAllDeep(document.documentElement, 'input[type="password"]').filter(
-      (el) => el instanceof HTMLInputElement && isVisible(el)
-    );
-  }
-
-  /**
-   * 登录前记住明文：部分站点在点击登录后用 RSA/AES 等改写 input.value。
-   * WeakMap 按元素；Map 按表单上下文（站点常会替换 password 节点）。
-   */
   const plainPasswordMemo = new WeakMap();
   const plainPasswordByContext = new Map();
+  const typedPasswordByKey = new WeakMap();
+  const keydownHandledAt = new WeakMap();
   const MAX_CONTEXT_ENTRIES = 12;
+
+  function isPasswordField(el) {
+    const fn = globalThis.__keynestIsPasswordLikeInput;
+    if (typeof fn === "function") return fn(el);
+    return el instanceof HTMLInputElement && el.type === "password";
+  }
+
+  function appendTypedPlain(el, chunk, replace) {
+    if (!isPasswordField(el)) return;
+    let buf = replace ? String(chunk ?? "") : (typedPasswordByKey.get(el) || "") + String(chunk ?? "");
+    typedPasswordByKey.set(el, buf);
+    if (buf.length >= 2) mergePlainIntoStores(el, buf);
+  }
 
   function getPasswordContextKey(el) {
     const form = el.closest("form");
@@ -68,136 +65,203 @@
     }
   }
 
-  /** @returns {boolean} domVal 是否相对 plainHint 更像站点加密后的串 */
-  function looksLikeSiteCiphertext(domVal, plainHint) {
-    if (!domVal || !plainHint || domVal === plainHint) return false;
-    const dr = domVal.length;
-    const rr = plainHint.length;
-    if (rr === 0) return false;
-    const domCompact = domVal.replace(/\s/g, "");
-    if (dr >= rr * 1.5 && dr >= rr + 12) return true;
-    if (dr >= rr * 2) return true;
-    if (dr >= rr + 16 && dr >= 24) return true;
-    if (dr >= rr + 24 && dr >= 32) return true;
-    if (dr >= 32 && /^[0-9a-f]{32,}$/i.test(domCompact)) return true;
-    if (
-      dr >= 36 &&
-      rr <= 128 &&
-      /^[A-Za-z0-9+/=_-]+$/.test(domCompact) &&
-      /[^A-Za-z0-9/+=_\-\s]/.test(plainHint)
-    ) {
-      return true;
-    }
-    return false;
-  }
+  const pickBetterPlain =
+    globalThis.__keynestPickBetterPlain ||
+    function (prev, next) {
+      if (!next) return prev ?? "";
+      if (!prev) return next;
+      return next.length >= prev.length ? next : prev;
+    };
 
-  /** 站点常在点击登录瞬间把 value 改成 1 个掩码/占位字符，不得用更短值覆盖已记住的长明文 */
-  function isLikelyTransientMask(domVal, plainHint) {
-    if (!domVal || !plainHint || domVal === plainHint) return false;
-    if (plainHint.length < 2) return false;
-    if (domVal.length !== 1) return false;
-    if (looksLikeSiteCiphertext(domVal, plainHint)) return true;
-    return true;
-  }
-
-  function pickBetterPlain(prev, next) {
-    if (!next) return prev ?? "";
-    if (!prev) return next;
-    if (next === prev) return prev;
-    if (looksLikeSiteCiphertext(next, prev)) return prev;
-    if (looksLikeSiteCiphertext(prev, next)) return next;
-    if (isLikelyTransientMask(next, prev)) return prev;
-    if (isLikelyTransientMask(prev, next)) return next;
-    // 正常输入过程变长；同长度保留较新值
-    if (next.length > prev.length) return next;
-    if (next.length < prev.length) return prev;
-    return next;
-  }
-
-  function rememberPlainPassword(el) {
-    if (!(el instanceof HTMLInputElement) || el.type !== "password") return;
-    const next = String(el.value ?? "");
-    if (!next) return;
-    const prev = plainPasswordMemo.get(el);
-    const best = pickBetterPlain(prev, next);
-    plainPasswordMemo.set(el, best);
+  function mergePlainIntoStores(el, plain) {
+    if (!plain || !(el instanceof HTMLInputElement) || !isPasswordField(el)) return;
+    const p = String(plain);
+    if (p.length === 1) return;
+    typedPasswordByKey.set(el, pickBetterPlain(typedPasswordByKey.get(el), p));
+    plainPasswordMemo.set(el, pickBetterPlain(plainPasswordMemo.get(el), p));
     const ctxKey = getPasswordContextKey(el);
-    plainPasswordByContext.set(ctxKey, pickBetterPlain(plainPasswordByContext.get(ctxKey), best));
+    plainPasswordByContext.set(ctxKey, pickBetterPlain(plainPasswordByContext.get(ctxKey), p));
     pruneContextMap();
+    const rec = globalThis.__keynestRecordTruePlain;
+    if (typeof rec === "function") rec(el, p);
+    else {
+      const pub = globalThis.__keynestPublishPageCredential;
+      if (typeof pub === "function") pub(p, "");
+    }
+  }
+
+  function applyInputEventToTypedBuffer(ev) {
+    const t = ev.target;
+    if (!isPasswordField(t)) return;
+    const inputType = String(ev.inputType || "");
+    let buf = typedPasswordByKey.get(t) || "";
+
+    if (inputType === "deleteContentBackward" || inputType === "deleteWordBackward") {
+      buf = buf.slice(0, Math.max(0, buf.length - 1));
+    } else if (inputType === "deleteContentForward") {
+      buf = buf.slice(1);
+    } else if (inputType === "deleteByCut") {
+      buf = String(t.value ?? "") ? buf.slice(0, Math.max(0, buf.length - 1)) : "";
+    } else if (
+      inputType === "insertText" ||
+      inputType === "insertCompositionText" ||
+      inputType === "insertFromPaste" ||
+      inputType === "insertFromDrop" ||
+      inputType === "insertReplacementText" ||
+      inputType === "insertFromYank"
+    ) {
+      const data = ev.data;
+      if (data != null && data !== "") {
+        buf =
+          inputType === "insertFromPaste" || inputType === "insertReplacementText"
+            ? data
+            : buf + data;
+      }
+    }
+
+    if (buf.length >= 2) mergePlainIntoStores(t, buf);
+    else if (buf.length === 1) typedPasswordByKey.set(t, buf);
+  }
+
+  function findHiddenPasswordValues() {
+    const out = [];
+    for (const el of querySelectorAllDeep(document.documentElement, 'input[type="hidden"]')) {
+      if (!(el instanceof HTMLInputElement)) continue;
+      const blob = (el.name || "") + (el.id || "") + (el.getAttribute("autocomplete") || "");
+      if (!/pass|pwd|密码/i.test(blob)) continue;
+      const v = String(el.value || "").trim();
+      if (v.length >= 2) out.push(v);
+    }
+    return out;
+  }
+
+  function findAllPasswordInputs() {
+    const pass = querySelectorAllDeep(document.documentElement, 'input[type="password"]').filter(
+      (el) => el instanceof HTMLInputElement && isVisible(el)
+    );
+    const textLike = querySelectorAllDeep(
+      document.documentElement,
+      'input[type="text"], input[type="tel"], input:not([type])'
+    ).filter((el) => el instanceof HTMLInputElement && isVisible(el) && isPasswordField(el));
+    const seen = new Set(pass);
+    for (const el of textLike) {
+      if (!seen.has(el)) {
+        pass.push(el);
+        seen.add(el);
+      }
+    }
+    return pass;
+  }
+
+  function bestPlainPassword(passwordEl) {
+    if (!(passwordEl instanceof HTMLInputElement)) {
+      return String(passwordEl?.value ?? "").trim();
+    }
+    if (!isPasswordField(passwordEl)) {
+      return String(passwordEl.value ?? "").trim();
+    }
+    const topSt = globalThis.__keynestKnTopState?.();
+    const hooked = globalThis.__keynestGetHookedPlain?.(passwordEl) || "";
+    const typed = typedPasswordByKey.get(passwordEl) || "";
+    const memo = plainPasswordMemo.get(passwordEl) || "";
+    const ctx = plainPasswordByContext.get(getPasswordContextKey(passwordEl)) || "";
+    const domVal = String(passwordEl.value ?? "").trim();
+    const parts = [topSt?.pagePassword, hooked, typed, memo, ctx, ...findHiddenPasswordValues()];
+    const looksCipher = globalThis.__keynestLooksLikeSiteCiphertext;
+    if (
+      domVal.length >= 2 &&
+      (typeof looksCipher !== "function" || !looksCipher(domVal, typed || memo || ctx || ""))
+    ) {
+      parts.push(domVal);
+    }
+    const fold = globalThis.__keynestBestPlainFromSources;
+    return typeof fold === "function" ? fold(parts) : "";
   }
 
   function snapshotAllPlainPasswords() {
     try {
-      for (const el of findAllPasswordInputs()) rememberPlainPassword(el);
+      for (const el of findAllPasswordInputs()) {
+        const best = bestPlainPassword(el);
+        if (best) mergePlainIntoStores(el, best);
+      }
     } catch (_) {}
   }
 
   function resolvePlainPassword(passwordEl) {
-    if (!(passwordEl instanceof HTMLInputElement) || passwordEl.type !== "password") {
-      return String(passwordEl?.value ?? "");
-    }
-    const domVal = String(passwordEl.value ?? "");
-    const remembered = plainPasswordMemo.get(passwordEl);
-    const ctxPlain = plainPasswordByContext.get(getPasswordContextKey(passwordEl));
-
-    /** @type {string[]} */
-    const candidates = [];
-    if (remembered) candidates.push(remembered);
-    if (ctxPlain && ctxPlain !== remembered) candidates.push(ctxPlain);
-
-    for (const plain of candidates) {
-      if (!plain) continue;
-      if (domVal === plain) return domVal;
-      if (looksLikeSiteCiphertext(domVal, plain)) return plain;
-      if (isLikelyTransientMask(domVal, plain)) return plain;
-    }
-
-    const bestLocal = pickBetterPlain(
-      pickBetterPlain(remembered ?? "", ctxPlain ?? ""),
-      domVal
-    );
-    if (bestLocal) return bestLocal;
-
-    if (remembered === undefined || remembered === "") return domVal;
-    if (domVal === remembered) return domVal;
-    const dr = domVal.length;
-    const rr = remembered.length;
-    if (rr === 0) return domVal;
-    if (isLikelyTransientMask(domVal, remembered)) return remembered;
-    if (dr >= rr * 2) return remembered;
-    if (dr >= rr + 24 && dr >= 32) return remembered;
-    const domCompact = domVal.replace(/\s/g, "");
-    if (
-      dr >= 48 &&
-      rr <= 96 &&
-      /^[A-Za-z0-9+/=_-]+$/.test(domCompact) &&
-      /[^A-Za-z0-9/+=_-]/.test(remembered)
-    ) {
-      return remembered;
-    }
-    if (dr < rr) return remembered;
-    return domVal;
+    return bestPlainPassword(passwordEl);
   }
 
   function bindPasswordMemoryEvents() {
-    const onPasswordEvent = (ev) => {
-      const t = ev.target;
-      if (t instanceof HTMLInputElement && t.type === "password") rememberPlainPassword(t);
-    };
-    document.addEventListener("input", onPasswordEvent, true);
-    document.addEventListener("change", onPasswordEvent, true);
-    document.addEventListener("keyup", onPasswordEvent, true);
-    document.addEventListener("beforeinput", onPasswordEvent, true);
-    document.addEventListener("focusout", onPasswordEvent, true);
+    document.addEventListener(
+      "beforeinput",
+      (ev) => {
+        const t = ev.target;
+        if (!isPasswordField(t)) return;
+        const it = String(ev.inputType || "");
+        if (
+          it.startsWith("delete") ||
+          it === "insertFromPaste" ||
+          it === "insertReplacementText" ||
+          it === "insertFromDrop" ||
+          it === "insertFromYank"
+        ) {
+          applyInputEventToTypedBuffer(ev);
+        }
+      },
+      true
+    );
+    document.addEventListener(
+      "keydown",
+      (ev) => {
+        if (ev.isComposing || ev.repeat || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        const t = ev.target;
+        if (!isPasswordField(t)) return;
+        const key = ev.key;
+        let buf = typedPasswordByKey.get(t) || "";
+        if (key === "Backspace") {
+          appendTypedPlain(t, buf.slice(0, Math.max(0, buf.length - 1)), true);
+          return;
+        }
+        if (key === "Delete") {
+          appendTypedPlain(t, buf.slice(1), true);
+          return;
+        }
+        if (key.length !== 1) return;
+        keydownHandledAt.set(t, Date.now());
+        appendTypedPlain(t, buf + key, true);
+      },
+      true
+    );
+    document.addEventListener(
+      "focusout",
+      (ev) => {
+        if (!isPasswordField(ev.target)) return;
+        const best = bestPlainPassword(ev.target);
+        if (best) mergePlainIntoStores(ev.target, best);
+        armSaveCapture();
+      },
+      true
+    );
     document.addEventListener("pointerdown", snapshotAllPlainPasswords, true);
-    document.addEventListener("mousedown", snapshotAllPlainPasswords, true);
   }
 
   bindPasswordMemoryEvents();
 
+  function armSaveCapture() {
+    snapshotAllPlainPasswords();
+    const snap = collectLoginSnapshot();
+    if (!snap?.password) return false;
+    const merge = globalThis.__keynestMergeArmedCredential;
+    return (
+      typeof merge === "function" &&
+      merge(snap.username, snap.password, { title: document.title, url: location.href })
+    );
+  }
+
   globalThis.__keynestResolvePlainPassword = resolvePlainPassword;
+  globalThis.__keynestBestPlainPassword = bestPlainPassword;
   globalThis.__keynestSnapshotPlainPasswords = snapshotAllPlainPasswords;
-  globalThis.__keynestLooksLikeSiteCiphertext = looksLikeSiteCiphertext;
+  globalThis.__keynestArmSaveCapture = armSaveCapture;
 
   function pickBestPasswordInput() {
     const list = findAllPasswordInputs();
@@ -210,14 +274,12 @@
       if (ac.includes("current-password")) score += 100;
       if (ac.includes("new-password")) score -= 50;
       const r = el.getBoundingClientRect();
-      const area = r.width * r.height;
-      score += Math.min(area / 100, 40);
+      score += Math.min((r.width * r.height) / 100, 40);
       const cx = (r.left + r.right) / 2;
       const cy = (r.top + r.bottom) / 2;
-      const vx = globalThis.innerWidth / 2;
-      const vy = globalThis.innerHeight / 2;
-      score -= (Math.abs(cx - vx) + Math.abs(cy - vy)) / 50;
+      score -= (Math.abs(cx - globalThis.innerWidth / 2) + Math.abs(cy - globalThis.innerHeight / 2)) / 50;
       if (el.disabled || el.readOnly) score -= 30;
+      score += bestPlainPassword(el).length;
       return { el, score };
     });
     scored.sort((a, b) => b.score - a.score);
@@ -228,16 +290,27 @@
 
   function isUsernameType(el) {
     const t = (el.getAttribute("type") || "text").toLowerCase();
-    if (t === "hidden" || t === "password" || t === "checkbox" || t === "radio" || t === "button" || t === "submit" || t === "file" || t === "range" || t === "color") return false;
-    if (!USERNAME_TYPES.test(t) && t !== "") return false;
-    return true;
+    if (
+      t === "hidden" ||
+      t === "password" ||
+      t === "checkbox" ||
+      t === "radio" ||
+      t === "button" ||
+      t === "submit" ||
+      t === "file" ||
+      t === "range" ||
+      t === "color"
+    ) {
+      return false;
+    }
+    return USERNAME_TYPES.test(t) || t === "";
   }
 
   function semanticUsernameScore(el) {
     const ac = (el.getAttribute("autocomplete") || "").toLowerCase();
     const blob =
       (el.getAttribute("aria-label") || "") +
-      (el.getAttribute("placeholder") || "") +
+      (el.placeholder || "") +
       (el.name || "") +
       (el.id || "") +
       ac +
@@ -278,9 +351,7 @@
       const ecx = (r.left + r.right) / 2;
       const ecy = (r.top + r.bottom) / 2;
       const dy = pcy - ecy;
-      if (dy > 8 && dy < 360 && Math.abs(ecx - pcx) < Math.max(pr.width, r.width) * 2.5) {
-        score += 40;
-      }
+      if (dy > 8 && dy < 360 && Math.abs(ecx - pcx) < Math.max(pr.width, r.width) * 2.5) score += 40;
       if (r.bottom <= pr.top + 4) score += 20;
       if (score > bestScore) {
         bestScore = score;
@@ -303,32 +374,24 @@
       container = container.parentElement;
     }
     const passwords = findAllPasswordInputs();
-    const others = passwords.filter((p) => p !== passEl);
     const scope =
-      others.length > 0 ? document.documentElement : passEl.closest("main") || passEl.closest('[role="main"]') || document.body || document.documentElement;
+      passwords.length > 1
+        ? document.documentElement
+        : passEl.closest("main") || passEl.closest('[role="main"]') || document.body || document.documentElement;
     return findUsernameInContainer(scope, passEl);
   }
 
   function setNativeValue(el, value) {
     if (!el) return;
-
     const lastValue = el.value;
-
     const proto =
-      el instanceof HTMLTextAreaElement
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
+      el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const desc = Object.getOwnPropertyDescriptor(proto, "value");
-    if (desc && typeof desc.set === "function") {
-      desc.set.call(el, value);
-    } else {
-      el.value = value;
-    }
+    if (desc && typeof desc.set === "function") desc.set.call(el, value);
+    else el.value = value;
 
     const tracker = el._valueTracker;
-    if (tracker && typeof tracker.setValue === "function") {
-      tracker.setValue(lastValue);
-    }
+    if (tracker && typeof tracker.setValue === "function") tracker.setValue(lastValue);
 
     el.dispatchEvent(
       new InputEvent("input", {
@@ -339,45 +402,37 @@
       })
     );
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    try {
-      el.dispatchEvent(
-        new InputEvent("beforeinput", {
-          bubbles: true,
-          cancelable: true,
-          inputType: "insertFromPaste",
-          data: value,
-        })
-      );
-    } catch (_) {}
+    if (el instanceof HTMLInputElement && isPasswordField(el) && value) {
+      mergePlainIntoStores(el, String(value));
+    }
   }
 
-  /**
-   * @param {HTMLInputElement | HTMLTextAreaElement} el
-   * @param {string} value
-   */
   function tryInsertTextCommand(el, value) {
     if (!el || value == null) return false;
     try {
       el.focus({ preventScroll: true });
       if (typeof el.select === "function") el.select();
       if (document.execCommand && document.execCommand("insertText", false, value)) {
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: value }));
+        el.dispatchEvent(
+          new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: value })
+        );
         el.dispatchEvent(new Event("change", { bubbles: true }));
+        if (el instanceof HTMLInputElement && isPasswordField(el)) {
+          mergePlainIntoStores(el, String(value));
+        }
         return true;
       }
     } catch (_) {}
     return false;
   }
 
-  /**
-   * @param {HTMLInputElement | null} passEl
-   * @param {HTMLInputElement | HTMLTextAreaElement | null} userEl
-   * @param {{ username?: string, password?: string }} cred
-   */
   function verifyCredFilled(passEl, userEl, cred) {
     const wantPass = cred.password != null ? String(cred.password) : "";
     const wantUser = cred.username != null ? String(cred.username) : "";
-    if (wantPass && (!passEl || String(passEl.value) !== wantPass)) return false;
+    if (wantPass) {
+      const got = passEl ? bestPlainPassword(passEl) : "";
+      if (got !== wantPass && String(passEl?.value ?? "") !== wantPass) return false;
+    }
     if (wantUser !== "" && (!userEl || String(userEl.value) !== wantUser)) return false;
     return true;
   }
@@ -386,9 +441,6 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  /**
-   * @param {{ username?: string, password?: string }} cred
-   */
   async function fillCredentials(cred) {
     if (!cred) return { ok: false, reason: "" };
 
@@ -396,12 +448,10 @@
       const passEl = pickBestPasswordInput();
       if (!passEl) return;
       const userEl = findUsernameForPassword(passEl);
-
       if (userEl && cred.username != null && cred.username !== "") {
         userEl.focus({ preventScroll: true });
         setNativeValue(userEl, cred.username);
       }
-
       const fillPass = () => {
         const p = pickBestPasswordInput();
         if (p && cred.password != null) {
@@ -409,19 +459,18 @@
           setNativeValue(p, cred.password);
         }
       };
-
       if (cred.password != null) {
-        setTimeout(fillPass, userEl && cred.username != null && cred.username !== "" ? 28 : 0);
+        setTimeout(fillPass, userEl && cred.username ? 28 : 0);
       }
     };
 
     const applyPasteFallback = () => {
       const passEl = pickBestPasswordInput();
       const userEl = passEl ? findUsernameForPassword(passEl) : null;
-      if (cred.password != null && passEl && String(passEl.value) !== String(cred.password)) {
+      if (cred.password != null && passEl && bestPlainPassword(passEl) !== String(cred.password)) {
         tryInsertTextCommand(passEl, String(cred.password));
       }
-      if (cred.username != null && cred.username !== "" && userEl && String(userEl.value) !== String(cred.username)) {
+      if (cred.username && userEl && String(userEl.value) !== String(cred.username)) {
         tryInsertTextCommand(userEl, String(cred.username));
       }
     };
@@ -430,14 +479,11 @@
       applyValues();
       await sleep(35);
       applyPasteFallback();
-
       for (let step = 0; step < 18; step++) {
         await sleep(42);
         const passEl = pickBestPasswordInput();
         const userEl = passEl ? findUsernameForPassword(passEl) : null;
-        if (verifyCredFilled(passEl, userEl, cred)) {
-          return { ok: true };
-        }
+        if (verifyCredFilled(passEl, userEl, cred)) return { ok: true };
         if (step === 6 || step === 12) {
           applyValues();
           applyPasteFallback();
@@ -451,31 +497,35 @@
     };
   }
 
-  /**
-   * 供 content 脚本在登录「按钮点击」等非经典 submit 场景读取当前输入框（含 Shadow DOM）。
-   * @returns {{ username: string, password: string } | null}
-   */
   function collectLoginSnapshot() {
     const passEl = pickBestPasswordInput();
-    if (!passEl || !String(passEl.value || "").trim()) return null;
+    if (!passEl) return null;
+    const localPass = bestPlainPassword(passEl);
+    const topSt = globalThis.__keynestKnTopState?.();
+    const fold = globalThis.__keynestBestPlainFromSources;
+    const password =
+      typeof fold === "function"
+        ? fold([topSt?.pagePassword, localPass])
+        : pickBetterPlain(topSt?.pagePassword || "", localPass);
+    const saveable = globalThis.__keynestIsSaveablePassword;
+    if (!password || (typeof saveable === "function" && !saveable(password))) return null;
+
     const userEl = findUsernameForPassword(passEl);
     let username = userEl ? String(userEl.value || "").trim() : "";
+    if (!username && topSt?.pageUsername) username = String(topSt.pageUsername).trim();
     if (!username) {
-      const passwords = findAllPasswordInputs();
       const scope =
-        passwords.length > 1
+        findAllPasswordInputs().length > 1
           ? document.documentElement
           : passEl.closest("main") || passEl.closest('[role="main"]') || document.body || document.documentElement;
-      const telCandidates = querySelectorAllDeep(scope, 'input[type="tel"]').filter(
-        (el) => el instanceof HTMLInputElement && isVisible(el) && el !== passEl
+      const tel = querySelectorAllDeep(scope, 'input[type="tel"]').find(
+        (el) => el instanceof HTMLInputElement && isVisible(el) && String(el.value || "").trim()
       );
-      const tel = telCandidates.find((el) => String(el.value || "").trim());
       if (tel) username = String(tel.value || "").trim();
     }
-    return {
-      username,
-      password: resolvePlainPassword(passEl),
-    };
+    const pub = globalThis.__keynestPublishPageCredential;
+    if (typeof pub === "function") pub(password, username);
+    return { username, password };
   }
 
   globalThis.__keynestFillCredentials = fillCredentials;

@@ -1,14 +1,14 @@
 {
   "manifest_version": 3,
   "name": "KeyNest 助手",
-  "version": "0.5.3",
+  "version": "0.7.2",
   "description": "与本机 KeyNest 应用通信，在网页上填入账号密码（需桌面端已解锁并开启桥接）。",
   "permissions": ["activeTab", "scripting", "tabs"],
   "host_permissions": ["http://127.0.0.1:17373/*"],
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["credential-fill.js", "content.js"],
+      "js": ["password-plain.js", "password-hook.js", "credential-fill.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": true
     }

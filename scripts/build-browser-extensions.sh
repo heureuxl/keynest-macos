@@ -24,6 +24,7 @@ CRX_BUILD="$ROOT/browser/chrome-extension.crx"
 EXT_CHROME="$ROOT/browser/chrome-extension"
 EXT_EDGE="$ROOT/browser/edge-extension"
 EXT_FF="$ROOT/browser/firefox-extension"
+EXT_SAFARI="$ROOT/browser/safari-extension"
 
 zip_folder() {
   local src_dir="$1"
@@ -46,6 +47,9 @@ zip_folder "$EXT_EDGE" "$DIST/KeyNest-Edge.zip" "KeyNest"
 
 echo "==> KeyNest-Firefox.zip"
 zip_folder "$EXT_FF" "$DIST/KeyNest-Firefox.zip" "KeyNest"
+
+echo "==> KeyNest-Safari.zip（Web Extension 源码，需 Xcode 转换后安装）"
+zip_folder "$EXT_SAFARI" "$DIST/KeyNest-Safari.zip" "KeyNest"
 
 # UTF-8 中文安装说明（带 BOM），源码见 scripts/extension-install-notes/
 rm -f "$DIST"/*.txt

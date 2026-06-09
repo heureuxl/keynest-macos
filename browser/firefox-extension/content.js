@@ -81,14 +81,76 @@ async function runSaveOffer(payload) {
   }
 }
 
-/** 保管库密码与当前输入是否不同（排除站点把输入框改成密文导致的假不一致） */
+function isTopFrame() {
+  try {
+    return window === window.top;
+  } catch (_) {
+    return true;
+  }
+}
+
+/** 保管库密码与待保存明文是否不同 */
 function vaultPasswordDiffers(stored, typed) {
   if (stored === typed) return false;
+  if (stored.length <= 2 && typed.length > stored.length) return true;
   const looksCipher = globalThis.__keynestLooksLikeSiteCiphertext;
   if (typeof looksCipher === "function") {
     if (looksCipher(typed, stored) || looksCipher(stored, typed)) return true;
   }
   return stored !== typed;
+}
+
+/** 任意帧捕获凭据；仅顶层帧弹出保存确认 */
+function scheduleSaveOffer(delayMs) {
+  const snap = globalThis.__keynestSnapshotPlainPasswords;
+  if (typeof snap === "function") snap();
+  const arm = globalThis.__keynestArmSaveCapture;
+  if (typeof arm === "function") arm();
+
+  const saveable = globalThis.__keynestIsSaveablePassword;
+  const getArmed = globalThis.__keynestGetArmedCredential;
+  const cred = typeof getArmed === "function" ? getArmed() : null;
+  if (!cred?.password || (typeof saveable === "function" && !saveable(cred.password))) {
+    return;
+  }
+
+  const top = knTopWindow();
+  const delay = delayMs ?? 500;
+
+  if (!isTopFrame()) {
+    try {
+      const snapFn = globalThis.__keynestCollectLoginSnapshot;
+      const snap = typeof snapFn === "function" ? snapFn() : null;
+      top.postMessage({ type: "keynest-schedule-save", delayMs: delay, cred: snap }, "*");
+    } catch (_) {}
+    return;
+  }
+
+  const st = globalThis.__keynestKnTopState?.();
+  if (!st) return;
+  clearTimeout(st.saveTimer);
+  st.saveTimer = setTimeout(() => flushSaveOffer(), delay);
+}
+
+async function flushSaveOffer() {
+  if (!isTopFrame()) return;
+
+  const coord = knCoord();
+  if (coord.saveOfferRunning) return;
+
+  const getArmed = globalThis.__keynestGetArmedCredential;
+  const saveable = globalThis.__keynestIsSaveablePassword;
+  const cred = typeof getArmed === "function" ? getArmed() : null;
+  if (!cred?.password || (typeof saveable === "function" && !saveable(cred.password))) {
+    return;
+  }
+
+  await runSaveOffer({
+    title: cred.title || document.title || "",
+    url: cred.url || location.href,
+    username: cred.username || "",
+    password: cred.password,
+  });
 }
 
 /** @returns {Promise<{ ok: boolean, hint?: string }>} */
@@ -124,17 +186,30 @@ async function postSaveToBridge(body, dedupeKey, now) {
 
 /** @param {{ title?: string, url: string, username: string, password: string }} payload */
 async function runSaveOfferInner(payload) {
-  const password = String(payload.password || "").trim();
-  if (!password) return;
+  const getArmed = globalThis.__keynestGetArmedCredential;
+  const armed = typeof getArmed === "function" ? getArmed() : null;
+  const pickBetter = globalThis.__keynestPickBetterPlain;
+
+  const fold = globalThis.__keynestBestPlainFromSources;
+  const pagePwd = globalThis.__keynestKnTopState?.()?.pagePassword || "";
+  let password =
+    typeof fold === "function"
+      ? fold([pagePwd, armed?.password, payload.password])
+      : String(payload.password || "").trim();
+  let username = String(payload.username || armed?.username || "").trim();
+  const saveable = globalThis.__keynestIsSaveablePassword;
+  if (typeof saveable === "function" ? !saveable(password) : password.length < 2) {
+    return;
+  }
 
   const coord = knCoord();
   const now = Date.now();
-  if (now - (coord.lastSaveOfferAt || 0) < 1200) return;
+  if (now - (coord.lastSaveOfferAt || 0) < 800) return;
   coord.lastSaveOfferAt = now;
 
-  const uname = String(payload.username || "").trim();
+  const uname = username;
   const dedupe =
-    "kn_sv_" +
+    "kn_sv_ok_" +
     location.hostname +
     "_" +
     (() => {
@@ -144,10 +219,6 @@ async function runSaveOfferInner(payload) {
         return String(uname.length) + "_" + String(password.length);
       }
     })();
-  try {
-    const prev = sessionStorage.getItem(dedupe);
-    if (prev && now - Number(prev) < 120000) return;
-  } catch (_) {}
 
   let shouldPost = false;
   try {
@@ -183,21 +254,23 @@ async function runSaveOfferInner(payload) {
                 return String(unameLower.length);
               }
             })();
-          let alreadyAsked = false;
+          let declinedRecently = false;
           try {
-            alreadyAsked = !!sessionStorage.getItem(mismatchAskKey);
+            const declinedAt = sessionStorage.getItem(mismatchAskKey);
+            if (declinedAt && Date.now() - Number(declinedAt) < 30 * 60 * 1000) {
+              declinedRecently = true;
+            }
           } catch (_) {}
-          if (alreadyAsked) {
+          if (declinedRecently) {
             shouldPost = false;
           } else {
             shouldPost = confirm(
               "KeyNest 已保存该账号，但密码与当前输入不一致。\n\n是否用新密码更新保管库？"
             );
-            if (shouldPost) {
-              try {
-                sessionStorage.setItem(mismatchAskKey, String(Date.now()));
-              } catch (_) {}
-            }
+            try {
+              if (shouldPost) sessionStorage.removeItem(mismatchAskKey);
+              else sessionStorage.setItem(mismatchAskKey, String(Date.now()));
+            } catch (_) {}
           }
           }
         }
@@ -221,6 +294,10 @@ async function runSaveOfferInner(payload) {
     const limit = await fetchSiteLimitCheck(pageUrl, uname);
     if (!(await confirmSiteLimitIfNeeded(limit || {}))) return;
 
+    if (typeof saveable === "function" ? !saveable(password) : password.length < 2) {
+      return;
+    }
+
     const result = await postSaveToBridge(
       {
         title: payload.title || document.title || "",
@@ -234,8 +311,10 @@ async function runSaveOfferInner(payload) {
     );
     if (!result.ok && result.hint) {
       showKeynestHint(result.hint);
-    } else if (result.ok && result.hint) {
-      showKeynestHint(result.hint);
+    } else if (result.ok) {
+      const clear = globalThis.__keynestClearArmedCredential;
+      if (typeof clear === "function") clear();
+      if (result.hint) showKeynestHint(result.hint);
     }
   }
 }
@@ -319,118 +398,15 @@ function looksLikeLoginButton(el) {
   return false;
 }
 
-/** 在站点改写密码框为密文之前同步抓取（登录按钮 mousedown/click 的 capture 阶段） */
-function capturePendingSaveSnapshot() {
-  const snapAll = globalThis.__keynestSnapshotPlainPasswords;
-  if (typeof snapAll === "function") snapAll();
-  const snapFn = globalThis.__keynestCollectLoginSnapshot;
-  if (typeof snapFn !== "function") return;
-  const snap = snapFn();
-  if (!snap || !String(snap.password || "").trim()) return;
-  globalThis.__keynestPendingSaveSnapshot = {
-    username: snap.username || "",
-    password: snap.password,
-    capturedAt: Date.now(),
-  };
-}
-
-function pickSaveSnapshot() {
-  const pending = globalThis.__keynestPendingSaveSnapshot;
-  const looksCipher = globalThis.__keynestLooksLikeSiteCiphertext;
-  const snapFn = globalThis.__keynestCollectLoginSnapshot;
-
-  if (pending && Date.now() - pending.capturedAt < 8000) {
-    const pwd = String(pending.password || "").trim();
-    if (pwd) {
-      if (typeof snapFn === "function") {
-        const fresh = snapFn();
-        const freshPwd = fresh ? String(fresh.password || "").trim() : "";
-        if (
-          freshPwd &&
-          typeof looksCipher === "function" &&
-          looksCipher(freshPwd, pwd) &&
-          !looksCipher(pwd, freshPwd)
-        ) {
-          return {
-            username: pending.username || fresh?.username || "",
-            password: pwd,
-          };
-        }
-      }
-      return { username: pending.username || "", password: pwd };
-    }
-  }
-
-  if (typeof snapFn !== "function") return null;
-  const snap = snapFn();
-  if (!snap || !String(snap.password || "").trim()) return null;
-  const pwd = String(snap.password);
-  if (pwd.length === 1 && pending) {
-    const pendingPwd = String(pending.password || "");
-    if (pendingPwd.length > 1) {
-      return { username: snap.username || pending.username || "", password: pendingPwd };
-    }
-  }
-  return { username: snap.username || "", password: pwd };
-}
-
-function cancelScheduledSnapshotSave() {
-  clearTimeout(globalThis.__keynestSaveDebounce);
-  globalThis.__keynestSaveDebounce = null;
-}
-
-function scheduleSnapshotSave() {
-  const coord = knCoord();
-  if (Date.now() - (coord.saveOfferHandledAt || 0) < 2500) return;
-  cancelScheduledSnapshotSave();
-  globalThis.__keynestSaveDebounce = setTimeout(async () => {
-    if (Date.now() - (knCoord().saveOfferHandledAt || 0) < 2500) return;
-    const snap = pickSaveSnapshot();
-    if (!snap) return;
-    delete globalThis.__keynestPendingSaveSnapshot;
-    if (!String(snap.username || "").trim()) {
-      showKeynestHint(
-        "KeyNest：未检测到账号输入框内容。若网站用手机号登录，请先填写手机号再点登录；也可之后在桌面端补充用户名。"
-      );
-    }
-    await runSaveOffer({
-      title: document.title || "",
-      url: location.href,
-      username: snap.username || "",
-      password: snap.password,
-    });
-  }, 320);
-}
-
-/** 点击是否会走经典 form submit（由 submit 监听统一弹窗，避免重复） */
-function willTriggerFormSubmitFromClick(el) {
-  const form = el.closest?.("form");
-  if (!(form instanceof HTMLFormElement)) return false;
-  if (!tpLooksLikeClassicPasswordLogin(form)) return false;
-  let node = el;
-  for (let i = 0; i < 8 && node; i++) {
-    const tag = (node.tagName || "").toLowerCase();
-    if (tag === "button") {
-      const type = (node.getAttribute("type") || "submit").toLowerCase();
-      return type === "submit" || type === "";
-    }
-    if (tag === "input" && (node.getAttribute("type") || "").toLowerCase() === "submit") return true;
-    node = node.parentElement;
-  }
-  return false;
-}
-
 function onLoginSubmitIntent(ev) {
   const t = ev.target;
   if (!(t instanceof Element)) return;
   if (isOurUiElement(t)) return;
   if (!looksLikeLoginButton(t)) return;
-  capturePendingSaveSnapshot();
-  if (willTriggerFormSubmitFromClick(t)) return;
-  scheduleSnapshotSave();
+  scheduleSaveOffer(500);
 }
 
-document.addEventListener("mousedown", onLoginSubmitIntent, true);
+document.addEventListener("pointerdown", onLoginSubmitIntent, true);
 
 document.addEventListener(
   "keydown",
@@ -440,11 +416,8 @@ document.addEventListener(
     if (!(t instanceof HTMLElement)) return;
     if (t.isContentEditable) return;
     if (t instanceof HTMLTextAreaElement) return;
-    if (t instanceof HTMLInputElement && t.type === "password") {
-      capturePendingSaveSnapshot();
-      const form = t.closest?.("form");
-      if (form instanceof HTMLFormElement && tpLooksLikeClassicPasswordLogin(form)) return;
-      scheduleSnapshotSave();
+    if (t instanceof HTMLInputElement && (t.type === "password" || t.type === "text")) {
+      scheduleSaveOffer(500);
     }
   },
   true
@@ -512,62 +485,49 @@ function tpFindUsernameInput(form, passwordEl) {
   return byHint || candidates[0];
 }
 
-function tpLooksLikeClassicPasswordLogin(form) {
+function tpFormHasLoginPassword(form) {
   const pw = tpFindLoginPasswordInput(form);
-  if (!pw || !String(pw.value || "").trim()) return false;
-  const user = tpFindUsernameInput(form, pw);
-  if (!user) return false;
-  if (!String(user.value || "").trim()) return false;
-  return true;
+  if (!pw) return false;
+  const bestPlain = globalThis.__keynestBestPlainPassword;
+  const plain =
+    typeof bestPlain === "function"
+      ? String(bestPlain(pw) || "").trim()
+      : String(pw.value || "").trim();
+  return plain.length > 0;
 }
 
 document.addEventListener(
   "submit",
-  async (ev) => {
+  (ev) => {
     const form = ev.target;
     if (!(form instanceof HTMLFormElement)) return;
-    if (!tpLooksLikeClassicPasswordLogin(form)) return;
-
-    const snapAll = globalThis.__keynestSnapshotPlainPasswords;
-    if (typeof snapAll === "function") snapAll();
-
-    ev.preventDefault();
-
-    const passwordEl = tpFindLoginPasswordInput(form);
-    const usernameEl = tpFindUsernameInput(form, passwordEl);
-    const resolver = globalThis.__keynestResolvePlainPassword;
-    const password =
-      typeof resolver === "function" ? resolver(passwordEl) : String(passwordEl.value || "");
-    const username = String(usernameEl.value || "").trim();
-
-    const payload = {
-      title: document.title || "",
-      url: location.href,
-      username,
-      password,
-    };
-
-    cancelScheduledSnapshotSave();
+    if (!tpFormHasLoginPassword(form)) return;
     knCoord().saveOfferHandledAt = Date.now();
-    await runSaveOffer(payload);
-
-    const sub = ev.submitter;
-    if (sub && sub.name) {
-      let hid = form.querySelector('input[type="hidden"][data-keynest-autofill="submitter"]');
-      if (!hid) {
-        hid = document.createElement("input");
-        hid.type = "hidden";
-        hid.dataset.keynestAutofill = "submitter";
-        form.appendChild(hid);
-      }
-      hid.name = sub.name;
-      hid.value = sub.value || "";
-    }
-
-    HTMLFormElement.prototype.submit.call(form);
+    scheduleSaveOffer(450);
   },
   true
 );
+
+if (isTopFrame()) {
+  window.addEventListener("message", (ev) => {
+    if (ev.source == null || ev.data?.type !== "keynest-schedule-save") return;
+    const cred = ev.data.cred;
+    const merge = globalThis.__keynestMergeArmedCredential;
+    if (cred?.password && typeof merge === "function") {
+      merge(cred.username, cred.password, {
+        title: cred.title || document.title,
+        url: cred.url || location.href,
+      });
+    } else {
+      const arm = globalThis.__keynestArmSaveCapture;
+      if (typeof arm === "function") arm();
+    }
+    const st = globalThis.__keynestKnTopState?.();
+    if (!st) return;
+    clearTimeout(st.saveTimer);
+    st.saveTimer = setTimeout(() => flushSaveOffer(), ev.data.delayMs ?? 500);
+  });
+}
 
 function hasPasswordField() {
   return tpQuerySelectorAllDeep(document.documentElement, 'input[type="password"]').some((el) =>
